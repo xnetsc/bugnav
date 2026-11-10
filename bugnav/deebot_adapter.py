@@ -72,6 +72,7 @@ class DeebotAdapter:
         self._state = RobotState.UNKNOWN
         self._error = 0
         self._last_pos_t = 0.0
+        self.battery_pct: int | None = None  # latest BatteryEvent value
 
     # ------------------------------------------------------------ convert
     def to_metres(self, raw_x: float, raw_y: float) -> Point:
@@ -129,7 +130,12 @@ class DeebotAdapter:
         from deebot_client.api_client import ApiClient
         from deebot_client.authentication import Authenticator, create_rest_config
         from deebot_client.device import Device
-        from deebot_client.events import ErrorEvent, PositionsEvent, StateEvent
+        from deebot_client.events import (
+            BatteryEvent,
+            ErrorEvent,
+            PositionsEvent,
+            StateEvent,
+        )
         from deebot_client.models import State
         from deebot_client.events import PositionType
         from deebot_client.mqtt_client import MqttClient, create_mqtt_config
@@ -200,16 +206,22 @@ class DeebotAdapter:
         async def on_error(event) -> None:
             self._error = int(event.code or 0)
 
+        async def on_battery(event) -> None:
+            self.battery_pct = int(event.value)
+
         self._device.events.subscribe(PositionsEvent, on_pos)
         self._device.events.subscribe(StateEvent, on_state)
         self._device.events.subscribe(ErrorEvent, on_error)
+        self._device.events.subscribe(BatteryEvent, on_battery)
         self._PositionsEvent = PositionsEvent
         self._StateEvent = StateEvent
+        self._BatteryEvent = BatteryEvent
 
     def request_refresh(self) -> None:
         if self._device is not None:
             self._device.events.request_refresh(self._PositionsEvent)
             self._device.events.request_refresh(self._StateEvent)
+            self._device.events.request_refresh(self._BatteryEvent)
 
     # ------------------------------------------------------------- sample
     def sample(self, t: float) -> Sample | None:

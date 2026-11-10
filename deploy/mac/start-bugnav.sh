@@ -32,11 +32,15 @@ fi
 
 # Credentials go ONLY into ./.env (600) as container environment
 # variables. They are never written into config.json or any code file.
-if [ ! -s .env ]; then
+# Append-only: an existing .env (e.g. with LLM keys) is kept; the
+# Ecovacs lines are added only when missing.
+touch .env
+if ! grep -q '^ECOVACS_ACCOUNT_ID=' .env; then
   read -rp "科沃斯账号短 ID（App 个人资料里形如 EXXXXXXX，不要填手机号）: " ACC
   read -rsp "科沃斯账号密码（输入时不显示，输完回车）: " PW
   echo
-  printf "ECOVACS_ACCOUNT_ID='%s'\nECOVACS_PASSWORD='%s'\n" "$ACC" "$PW" > .env
+  [ -n "$(tail -c 1 .env)" ] && echo >> .env
+  printf "ECOVACS_ACCOUNT_ID='%s'\nECOVACS_PASSWORD='%s'\n" "$ACC" "$PW" >> .env
   chmod 600 .env
   echo "凭据已写入 .env（容器环境变量，仅本机，权限 600）"
 fi

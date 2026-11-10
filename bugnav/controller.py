@@ -34,6 +34,7 @@ from .clusters import ClusterManager, ObstacleCluster
 from .detector import DetectorConfig, StruggleDetector
 from .geometry import Point, angle_of, polar, quantize_heading
 from .model import Command, CommandKind, EpisodeStats, RobotState, Sample
+from .strategist import Plan
 from .trail import BreadcrumbTrail
 
 
@@ -44,6 +45,22 @@ class Phase(str, Enum):
     TO_GOAL = "to_goal"  # trying to reach the goal from this staging point
     BACKTRACK = "backtrack"  # leaving along the reversed breadcrumb trail
     COOLDOWN = "cooldown"
+    CONSULT = "consult"  # paused, waiting for the LLM strategy advisor
+
+
+@dataclass
+class ConsultRequest:
+    """A pending question to the strategy advisor.
+
+    The runner watches for this, asks the LLM asynchronously (the robot
+    is paused meanwhile), and feeds the answer back through
+    apply_consult_result(). If nobody answers within the consult
+    timeout, tick() falls back to the fixed strategy on its own.
+    """
+
+    kind: str  # "repeated_failures" | "full_circle"
+    situation: dict
+    t: float
 
 
 @dataclass
@@ -65,6 +82,14 @@ class ControllerConfig:
     cooldown_s: float = 45.0
     backtrack_spacing_m: float = 0.45
     detector: DetectorConfig = field(default_factory=DetectorConfig)
+    # LLM strategy advisor (see strategist.py). When enabled AND the
+    # runner has an LLM configured, the fixed strategy consults the
+    # advisor at its weak points instead of grinding on or giving up
+    # blindly. Disabled = behaviour is exactly the fixed strategy.
+    llm_strategy_enabled: bool = False
+    max_consults_per_episode: int = 2
+    consult_after_failures: int = 4
+    consult_timeout_s: float = 180.0
 
 
 class BugNavController:
@@ -96,6 +121,13 @@ class BugNavController:
         self._blacklist: list[tuple[Point, float]] = []  # (centre, expiry t)
         self._cooldown_until = 0.0
         self._error_pause_sent = False
+        # Strategy-advisor state (per episode)
+        self.pending_consult: ConsultRequest | None = None
+        self._consults_used = 0
+        self._failures = 0
+        self._planned_angles: list[float] = []
+        self._step_deg = self.cfg.step_angle_deg
+        self._clearance_m = self.cfg.staging_clearance_m
         from collections import deque
 
         self._recent: deque[Sample] = deque()
@@ -106,6 +138,17 @@ class BugNavController:
         cmds: list[Command] = []
         if self.phase == Phase.MONITOR:
             cmds = self._tick_monitor(sample)
+        elif self.phase == Phase.CONSULT:
+            # Robot is paused; we only wait for the advisor's answer.
+            # On timeout, fall back to exactly what the fixed strategy
+            # would have done - the advisor can never wedge the robot.
+            if (
+                self.pending_consult is not None
+                and sample.t - self.pending_consult.t >= self.cfg.consult_timeout_s
+            ):
+                cmds = self._consult_fallback(sample)
+            else:
+                cmds = []
         elif self.phase == Phase.COOLDOWN:
             if sample.t >= self._cooldown_until:
                 self.phase = Phase.MONITOR
@@ -188,6 +231,12 @@ class BugNavController:
         self._swept_deg = 0.0
         self._tried_sectors = {quantize_heading(approach_heading_deg)}
         self._error_pause_sent = False
+        self._consults_used = 0
+        self._failures = 0
+        self._planned_angles = []
+        self._step_deg = self.cfg.step_angle_deg
+        self._clearance_m = self.cfg.staging_clearance_m
+        self.pending_consult = None
         cmds.append(
             Command(
                 CommandKind.NOTIFY,
@@ -266,18 +315,28 @@ class BugNavController:
     def _staging_point(self, theta_deg: float) -> Point:
         cl = self._cluster
         assert cl is not None
-        r = cl.radius_m + self.cfg.staging_clearance_m
+        r = cl.radius_m + self._clearance_m
         return cl.centre + polar(theta_deg, r)
 
-    def _next_attempt(self, sample: Sample) -> list[Command]:
-        """Advance the staging angle by one small step and go there."""
-        self._theta_deg = (self._theta_deg + self.cfg.step_angle_deg) % 360.0
-        self._swept_deg += self.cfg.step_angle_deg
+    def _go_staging(self, sample: Sample, theta_deg: float) -> list[Command]:
+        self._theta_deg = theta_deg % 360.0
         staging = self._staging_point(self._theta_deg)
         self.phase = Phase.TO_STAGING
         self._pending_target = staging
         self._deadline = sample.t + self.cfg.staging_timeout_s
         return [Command(CommandKind.CLEAN_AREA, point=staging)]
+
+    def _next_attempt(self, sample: Sample) -> list[Command]:
+        """Advance the staging angle by one small step and go there."""
+        self._swept_deg += self._step_deg
+        return self._go_staging(sample, self._theta_deg + self._step_deg)
+
+    def _attempt_from_planned(self, sample: Sample) -> list[Command]:
+        """Jump to an advisor-planned angle (counts as swept arc too)."""
+        theta = self._planned_angles.pop(0)
+        delta = abs((theta - self._theta_deg + 180.0) % 360.0 - 180.0)
+        self._swept_deg += delta
+        return self._go_staging(sample, theta)
 
     def _attempt_failed(
         self, sample: Sample, why: str, *, physical: bool
@@ -303,6 +362,7 @@ class BugNavController:
         staging = self._staging_point(self._theta_deg)
         sector = quantize_heading(angle_of(self._goal - staging))
         self._tried_sectors.add(sector)
+        self._failures += 1
         cmds = [
             Command(CommandKind.PAUSE),
             Command(
@@ -313,6 +373,10 @@ class BugNavController:
         ]
         if self._swept_deg >= 360.0 - 1e-6:
             cmds.extend(self._conclude_full_circle(sample))
+        elif self._consult_available() and self._failures >= self.cfg.consult_after_failures:
+            cmds.extend(self._enter_consult(sample, "repeated_failures"))
+        elif self._planned_angles:
+            cmds.extend(self._attempt_from_planned(sample))
         else:
             cmds.extend(self._next_attempt(sample))
         return cmds
@@ -324,20 +388,136 @@ class BugNavController:
             # Table-leg case: a full circle means the perimeter is fully
             # explored and cleaned. That is the desired outcome.
             return self._episode_success(sample, circumnavigated=True)
-        # Large obstacle, every direction failed: provably unreachable
-        # this session. Blacklist for this session only, then leave the
-        # way we came in.
+        # Large obstacle, every direction failed. Before the fixed
+        # strategy gives up, give the advisor one look: it may spot a
+        # pattern (e.g. an opening just past a quantized step) that the
+        # rigid sweep cannot express.
+        if self._consult_available():
+            return self._enter_consult(sample, "full_circle")
+        return self._do_abandon(sample)
+
+    def force_abandon(self, sample: Sample) -> list[Command]:
+        """Supervisor order: abandon the current episode right now."""
+        if self._cluster is None or self.phase in (Phase.MONITOR, Phase.COOLDOWN):
+            return []
+        self.pending_consult = None
+        return self._do_abandon(sample)
+
+    def _do_abandon(self, sample: Sample) -> list[Command]:
+        """Blacklist for this session only, then leave the way we came."""
+        cl = self._cluster
+        assert cl is not None
         self._blacklist.append((cl.centre, sample.t + self.cfg.session_blacklist_ttl_s))
         self.stats[self._stats_key].abandons += 1
         self._save_stats()
         cmds = [
             Command(
                 CommandKind.NOTIFY,
-                message="full 360 deg explored, no opening; abandoning this "
-                "area for this session and backtracking out",
+                message="abandoning this area for this session and "
+                "backtracking out along the entry path",
             )
         ]
         self._start_backtrack(sample)
+        return cmds
+
+    # ------------------------------------------------- strategy advisor
+    def _consult_available(self) -> bool:
+        return (
+            self.cfg.llm_strategy_enabled
+            and self._consults_used < self.cfg.max_consults_per_episode
+            and self.pending_consult is None
+        )
+
+    def _situation(self, kind: str, sample: Sample) -> dict:
+        """Structured snapshot for the advisor. Numbers only - the
+        advisor gets no say over coordinates, only over angles/params."""
+        cl = self._cluster
+        assert cl is not None
+        st = self.stats.get(self._stats_key)
+        return {
+            "decision_point": kind,
+            "robot_pos": [round(sample.pos.x, 2), round(sample.pos.y, 2)],
+            "cluster_centre": [round(cl.centre.x, 2), round(cl.centre.y, 2)],
+            "cluster_radius_m": round(cl.radius_m, 2),
+            "hit_points": [[round(p.x, 2), round(p.y, 2)] for p in cl.hits],
+            "goal": ([round(self._goal.x, 2), round(self._goal.y, 2)]
+                     if self._goal else None),
+            "swept_deg": round(self._swept_deg),
+            "current_theta_deg": round(self._theta_deg),
+            "tried_approach_sectors_deg": sorted(self._tried_sectors),
+            "failures_this_episode": self._failures,
+            "consults_used": self._consults_used,
+            "step_angle_deg": self._step_deg,
+            "staging_clearance_m": self._clearance_m,
+            "history_this_spot": {
+                "episodes": st.episodes if st else 0,
+                "successes": st.successes if st else 0,
+                "abandons": st.abandons if st else 0,
+                "success_headings_deg": st.success_headings if st else [],
+            },
+        }
+
+    def _enter_consult(self, sample: Sample, kind: str) -> list[Command]:
+        self._consults_used += 1
+        self.phase = Phase.CONSULT
+        self.pending_consult = ConsultRequest(
+            kind=kind, situation=self._situation(kind, sample), t=sample.t)
+        return [
+            Command(
+                CommandKind.NOTIFY,
+                message=f"consulting strategy advisor ({kind}); robot paused",
+            )
+        ]
+
+    def _consult_fallback(self, sample: Sample) -> list[Command]:
+        """No answer (or shadow mode): do what the fixed strategy does."""
+        req = self.pending_consult
+        self.pending_consult = None
+        if req is not None and req.kind == "full_circle":
+            return self._do_abandon(sample)
+        if self._planned_angles:
+            return self._attempt_from_planned(sample)
+        return self._next_attempt(sample)
+
+    def apply_consult_result(
+        self, plan: Plan | None, sample: Sample
+    ) -> list[Command]:
+        """Feed the advisor's answer back in. plan=None means fallback.
+
+        The plan is already range-validated by strategist.parse_plan;
+        the controller additionally only ever turns it into staging
+        angles around the known cluster - never raw coordinates.
+        """
+        if self.pending_consult is None:
+            return []
+        if plan is None:
+            return self._consult_fallback(sample)
+        self.pending_consult = None
+        cmds = [
+            Command(
+                CommandKind.NOTIFY,
+                message=f"strategy advisor: {plan.reason or 'plan received'}",
+            )
+        ]
+        if plan.resolved:
+            cmds.append(
+                Command(CommandKind.NOTIFY,
+                        message="advisor judges the obstacle resolved; resuming"))
+            cmds.append(Command(CommandKind.RESUME_AUTO))
+            self._end_episode(sample)
+            return cmds
+        if plan.abandon:
+            cmds.extend(self._do_abandon(sample))
+            return cmds
+        if plan.step_angle_deg is not None:
+            self._step_deg = plan.step_angle_deg
+        if plan.staging_clearance_m is not None:
+            self._clearance_m = plan.staging_clearance_m
+        if plan.angles:
+            self._planned_angles = list(plan.angles)
+            cmds.extend(self._attempt_from_planned(sample))
+        else:
+            cmds.extend(self._next_attempt(sample))
         return cmds
 
     def _episode_success(
@@ -391,6 +571,7 @@ class BugNavController:
     def _end_episode(self, sample: Sample) -> None:
         self.trail.unfreeze()
         self.detector.reset()
+        self.pending_consult = None
         self._cluster = None
         self._goal = None
         self._pending_target = None
