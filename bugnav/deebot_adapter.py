@@ -1,12 +1,16 @@
 """Real-robot adapter built on the unofficial `deebot-client` library.
 
-Verified against deebot-client's source (Nov 2026):
+Verified against deebot-client 11.0.0 (the pinned PyPI release - its
+wheels install cleanly in Docker; upstream git main is ahead of PyPI
+and needs a Rust toolchain to build, so we do NOT track main):
   * Authenticator + create_rest_config + ApiClient.get_devices()
   * Device(device_info, authenticator); await device.initialize(mqtt)
-  * PositionsEvent carries Position(x, y, a) - raw map units + heading
+  * PositionsEvent carries Position(x, y, a) - raw map units + heading;
+    PositionType lives in deebot_client.events on this version
   * StateEvent / ErrorEvent for status and faults
   * Clean(CleanAction.PAUSE/RESUME/START/STOP) and
-    CleanArea(CleanMode.CUSTOM_AREA, [x1, y1, x2, y2]) for area commands
+    CleanArea(CleanMode.CUSTOM_AREA, "x1,y1,x2,y2") - area is a
+    comma-joined string on this version, not a list
 
 UNVERIFIED on a physical T80s: whether the T80s (DEX62, China region)
 is classified as a supported MQTT device at all, whether GetPos streams
@@ -66,7 +70,8 @@ class DeebotAdapter:
             y = -y
         return Point(x, y)
 
-    def to_raw_rect(self, centre: Point, half_m: float) -> list[int]:
+    def to_raw_rect(self, centre: Point, half_m: float) -> str:
+        """Return the 'x1,y1,x2,y2' content string CleanArea expects."""
         def raw_x(x_m: float) -> float:
             if self.cfg.invert_x:
                 x_m = -x_m
@@ -79,7 +84,7 @@ class DeebotAdapter:
 
         xs = sorted([raw_x(centre.x - half_m), raw_x(centre.x + half_m)])
         ys = sorted([raw_y(centre.y - half_m), raw_y(centre.y + half_m)])
-        return [int(xs[0]), int(ys[0]), int(xs[1]), int(ys[1])]
+        return f"{int(xs[0])},{int(ys[0])},{int(xs[1])},{int(ys[1])}"
 
     # -------------------------------------------------------------- setup
     async def connect(self, log) -> None:
@@ -89,8 +94,8 @@ class DeebotAdapter:
         from deebot_client.device import Device
         from deebot_client.events import ErrorEvent, PositionsEvent, StateEvent
         from deebot_client.models import State
+        from deebot_client.events import PositionType
         from deebot_client.mqtt_client import MqttClient, create_mqtt_config
-        from deebot_client.rs.map import PositionType
 
         global _STATE_MAP
         _STATE_MAP = {
