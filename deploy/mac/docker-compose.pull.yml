@@ -6,6 +6,11 @@ services:
     environment:
       ECOVACS_ACCOUNT_ID: "${ECOVACS_ACCOUNT_ID:?set ECOVACS_ACCOUNT_ID in .env}"
       ECOVACS_PASSWORD: "${ECOVACS_PASSWORD:?set ECOVACS_PASSWORD in .env}"
+      # Optional: LLM-assisted offline analysis (tools/analyze_episodes.py).
+      # Leave unset to disable. Any OpenAI-compatible endpoint works.
+      BUGNAV_LLM_API_KEY: "${BUGNAV_LLM_API_KEY:-}"
+      BUGNAV_LLM_BASE_URL: "${BUGNAV_LLM_BASE_URL:-https://api.meta.ai/v1}"
+      BUGNAV_LLM_MODEL: "${BUGNAV_LLM_MODEL:-muse-spark-1.3}"
     volumes:
       - ./config.json:/app/config.json:ro
       - ./data:/app/data
