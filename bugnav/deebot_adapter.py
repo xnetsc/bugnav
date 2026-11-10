@@ -46,6 +46,19 @@ class AdapterConfig:
     invert_x: bool = False
     invert_y: bool = False
     clean_command_v2: bool = False
+    # Hardware classes deebot-client does not know yet, aliased to the
+    # closest known class's capability set. The T80S (model
+    # KEPLER_PLUS_WH_AUTO, class "nazy54", probed live 2026-11-11) is
+    # unknown upstream. First template tried (ee23uv, V1 commands) got
+    # `20003 rcp not support` for getCleanInfo from the T80S firmware
+    # (fw 1.61.0) - it speaks the V2 command set. 9kpees carries the
+    # full modern V2 set: state via GetCleanInfoV2, CleanV2/CleanAreaV2,
+    # GetPos, GetError, PlaySound.
+    hardware_aliases: dict = None  # default set in __post_init__
+
+    def __post_init__(self):
+        if self.hardware_aliases is None:
+            self.hardware_aliases = {"nazy54": "9kpees"}
 
 
 _STATE_MAP = {}
@@ -87,6 +100,30 @@ class DeebotAdapter:
         return f"{int(xs[0])},{int(ys[0])},{int(xs[1])},{int(ys[1])}"
 
     # -------------------------------------------------------------- setup
+    def _register_hardware_aliases(self, log) -> None:
+        """Alias unknown hardware classes to a known capability set.
+
+        deebot-client keeps one module per hardware class in
+        hardware/deebot/<class>.py, registered in a DEVICES dict. For an
+        unknown class we import the template class's module and register
+        its StaticDeviceInfo under the unknown class's name too.
+        """
+        if not self.cfg.hardware_aliases:
+            return
+        import importlib
+
+        from deebot_client.hardware.deebot import DEVICES
+
+        for unknown, template in self.cfg.hardware_aliases.items():
+            if unknown in DEVICES:
+                continue
+            importlib.import_module(f"deebot_client.hardware.deebot.{template}")
+            if template in DEVICES:
+                DEVICES[unknown] = DEVICES[template]
+                log(f"hardware alias: {unknown} -> {template} capabilities")
+            else:
+                log(f"WARNING: hardware template {template} not found")
+
     async def connect(self, log) -> None:
         import aiohttp
         from deebot_client.api_client import ApiClient
@@ -115,6 +152,7 @@ class DeebotAdapter:
             )
         password_hash = hashlib.md5(password.encode()).hexdigest()
 
+        self._register_hardware_aliases(log)
         session = aiohttp.ClientSession()
         rest_cfg = create_rest_config(
             session,

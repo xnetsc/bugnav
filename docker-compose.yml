@@ -4,7 +4,9 @@ services:
     container_name: bugnav
     restart: unless-stopped
     environment:
-      # Fill in on the host only (or use a .env file next to this file).
+      # Credentials live only in the host environment (or a .env file next
+      # to this file) - never in code, never in config.json.
+      ECOVACS_ACCOUNT_ID: "${ECOVACS_ACCOUNT_ID:?set ECOVACS_ACCOUNT_ID in the environment or .env}"
       ECOVACS_PASSWORD: "${ECOVACS_PASSWORD:?set ECOVACS_PASSWORD in the environment or .env}"
     volumes:
       - ./config.json:/app/config.json:ro

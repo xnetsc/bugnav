@@ -26,19 +26,21 @@ docker info >/dev/null 2>&1 || { echo "Docker 引擎还没起来，等鲸鱼图�
 
 if [ ! -f config.json ]; then
   cp config.template.json config.json
-  read -rp "科沃斯账号短 ID（App 个人资料里形如 EXXXXXXX，不要填手机号）: " ACC
-  sed -i '' "s/__ACCOUNT_ID__/${ACC}/" config.json
   chmod 600 config.json
-  echo "已生成 config.json"
+  echo "已生成 config.json（不含任何凭据）"
 fi
 
+# Credentials go ONLY into ./.env (600) as container environment
+# variables. They are never written into config.json or any code file.
 if [ ! -s .env ]; then
+  read -rp "科沃斯账号短 ID（App 个人资料里形如 EXXXXXXX，不要填手机号）: " ACC
   read -rsp "科沃斯账号密码（输入时不显示，输完回车）: " PW
   echo
-  printf "ECOVACS_PASSWORD='%s'\n" "$PW" > .env
+  printf "ECOVACS_ACCOUNT_ID='%s'\nECOVACS_PASSWORD='%s'\n" "$ACC" "$PW" > .env
   chmod 600 .env
-  echo "已写入 .env（仅本机，权限 600）"
+  echo "凭据已写入 .env（容器环境变量，仅本机，权限 600）"
 fi
+chmod 600 .env 2>/dev/null || true
 
 mkdir -p data
 docker compose up -d --build

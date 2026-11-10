@@ -4,6 +4,7 @@ services:
     container_name: bugnav
     restart: unless-stopped
     environment:
+      ECOVACS_ACCOUNT_ID: "${ECOVACS_ACCOUNT_ID:?set ECOVACS_ACCOUNT_ID in .env}"
       ECOVACS_PASSWORD: "${ECOVACS_PASSWORD:?set ECOVACS_PASSWORD in .env}"
     volumes:
       - ./config.json:/app/config.json:ro

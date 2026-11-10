@@ -32,7 +32,14 @@ def _load_json(path: str) -> dict:
 
 async def _main_async(cfg_path: str, mode: str) -> None:
     raw = _load_json(cfg_path)
-    adapter = DeebotAdapter(AdapterConfig(**raw.get("account", {})))
+    account = dict(raw.get("account", {}))
+    # Credentials come from the environment (container env / .env file),
+    # never from code and never hardcoded in config.json. The env wins:
+    #   ECOVACS_ACCOUNT_ID  - the Ecovacs short ID
+    #   ECOVACS_PASSWORD    - read by the adapter directly, env only
+    if os.environ.get("ECOVACS_ACCOUNT_ID"):
+        account["account_id"] = os.environ["ECOVACS_ACCOUNT_ID"]
+    adapter = DeebotAdapter(AdapterConfig(**account))
     ctl_cfg = ControllerConfig()
     for k, v in raw.get("controller", {}).items():
         if k == "detector":
