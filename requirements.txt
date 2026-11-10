@@ -1,6 +1,7 @@
-# Pin the PyPI release: its prebuilt wheels install cleanly in Docker.
-# (Upstream git main is ahead - list-based CleanArea, rs.map module -
-# but building it needs a Rust toolchain; the adapter targets 11.0.0's
-# API: CleanArea(area: "x1,y1,x2,y2"), PositionType in deebot_client.events.)
-deebot-client==11.0.0
+# Pin 11.1.0b2: it is the first release shipping manylinux aarch64
+# wheels. 11.0.0 (and everything older) ships x86_64 wheels only, so
+# arm64 image builds fall back to compiling its Rust extension and
+# fail. API is identical to 11.0.0 for everything the adapter uses:
+# CleanArea(area: "x1,y1,x2,y2"), PositionType in deebot_client.events.
+deebot-client==11.1.0b2
 aiohttp
