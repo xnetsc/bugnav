@@ -1,0 +1,18 @@
+[Unit]
+Description=bugnav - external Bug-algorithm navigator for Deebot T80s
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/bugnav
+# Password lives ONLY here (file perms 600, owned by root). Never put it
+# in config.json and never in the repo.
+EnvironmentFile=/opt/bugnav/bugnav.env
+ExecStart=/opt/bugnav/.venv/bin/python -m bugnav.runner --config /opt/bugnav/config.json --mode observe
+Restart=always
+RestartSec=10
+# Switch --mode to active only after the verification checklist passes.
+
+[Install]
+WantedBy=multi-user.target

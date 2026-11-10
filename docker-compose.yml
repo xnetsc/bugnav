@@ -1,0 +1,14 @@
+services:
+  bugnav:
+    build: .
+    container_name: bugnav
+    restart: unless-stopped
+    environment:
+      # Fill in on the host only (or use a .env file next to this file).
+      ECOVACS_PASSWORD: "${ECOVACS_PASSWORD:?set ECOVACS_PASSWORD in the environment or .env}"
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./data:/app/data
+    # Start in observe mode. Switch to active only after the verification
+    # checklist in README.md has passed:
+    # command: ["python", "-m", "bugnav.runner", "--config", "config.json", "--mode", "active"]

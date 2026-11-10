@@ -1,0 +1,13 @@
+services:
+  bugnav:
+    image: ghcr.io/xnetsc/bugnav:latest
+    container_name: bugnav
+    restart: unless-stopped
+    environment:
+      ECOVACS_PASSWORD: "${ECOVACS_PASSWORD:?set ECOVACS_PASSWORD in .env}"
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./data:/app/data
+    # Default command in the image is observe mode. Switch to active only
+    # after the verification checklist passes, by uncommenting:
+    # command: ["python", "-m", "bugnav.runner", "--config", "config.json", "--mode", "active"]

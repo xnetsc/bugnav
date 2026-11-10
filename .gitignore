@@ -1,0 +1,6 @@
+config.json
+bugnav.env
+.env
+data/
+__pycache__/
+*.pyc
