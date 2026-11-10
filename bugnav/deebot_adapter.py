@@ -46,14 +46,23 @@ class AdapterConfig:
     invert_x: bool = False
     invert_y: bool = False
     clean_command_v2: bool = False
+    # For aliased classes, replace the template's state capability:
+    # state via GetChargeState + GetWorkState instead of GetCleanInfo[V2].
+    # Newer firmwares dropped getCleanInfo entirely (the T80S fw 1.61.0
+    # answers `20003 rcp not support` to both V1 and V2), which left the
+    # work state (cleaning/paused/returning) frozen at whatever the
+    # charge state last said - observed live 2026-11-11: state stayed
+    # "docked" through a whole cleaning run. deebot-client's newest
+    # hardware classes (c8rj4y etc.) source StateEvent exactly this way.
+    work_state_patch: bool = True
     # Hardware classes deebot-client does not know yet, aliased to the
     # closest known class's capability set. The T80S (model
     # KEPLER_PLUS_WH_AUTO, class "nazy54", probed live 2026-11-11) is
     # unknown upstream. First template tried (ee23uv, V1 commands) got
     # `20003 rcp not support` for getCleanInfo from the T80S firmware
     # (fw 1.61.0) - it speaks the V2 command set. 9kpees carries the
-    # full modern V2 set: state via GetCleanInfoV2, CleanV2/CleanAreaV2,
-    # GetPos, GetError, PlaySound.
+    # full modern V2 set: CleanV2/CleanAreaV2, GetPos, GetError,
+    # PlaySound (its state capability is patched per above).
     hardware_aliases: dict = None  # default set in __post_init__
 
     def __post_init__(self):
@@ -120,10 +129,40 @@ class DeebotAdapter:
                 continue
             importlib.import_module(f"deebot_client.hardware.deebot.{template}")
             if template in DEVICES:
-                DEVICES[unknown] = DEVICES[template]
+                info = DEVICES[template]
+                if self.cfg.work_state_patch:
+                    info = self._patch_state_to_work_state(info)
+                DEVICES[unknown] = info
                 log(f"hardware alias: {unknown} -> {template} capabilities")
             else:
                 log(f"WARNING: hardware template {template} not found")
+
+    @staticmethod
+    def _patch_state_to_work_state(info):
+        """Return a copy of `info` whose state capability reads state via
+        GetChargeState + GetWorkState (no GetCleanInfo[V2]).
+
+        Mirrors how deebot-client's newest hardware classes declare
+        their state CapabilityEvent. Everything else - clean, position,
+        error, battery - stays exactly the template's, and the template
+        class's own registration is left untouched (frozen dataclasses,
+        so `dataclasses.replace` builds new objects).
+        """
+        import dataclasses
+
+        from deebot_client.capabilities import CapabilityEvent
+        from deebot_client.commands.json.charge_state import GetChargeState
+        from deebot_client.events import StateEvent
+
+        from .work_state import GetWorkState, register_work_state_message
+
+        # GetWorkState does not exist in the pinned deebot-client
+        # (11.1.0b2) - it is vendored in bugnav.work_state; registering
+        # it also routes onWorkState pushes to its handler.
+        register_work_state_message()
+        state = CapabilityEvent(StateEvent, [GetChargeState(), GetWorkState()])
+        capabilities = dataclasses.replace(info.capabilities, state=state)
+        return dataclasses.replace(info, capabilities=capabilities)
 
     async def connect(self, log) -> None:
         import aiohttp
