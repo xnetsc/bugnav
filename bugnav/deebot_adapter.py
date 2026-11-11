@@ -83,6 +83,9 @@ class DeebotAdapter:
         self._error = 0
         self._last_pos_t = 0.0
         self.battery_pct: int | None = None  # latest BatteryEvent value
+        # Robot-reported UTC offset in hours (response header 'tzm'),
+        # captured at connect; None when the capture failed.
+        self.device_tz_offset_hours: float | None = None
         self.water_amount: int | None = None  # latest WaterInfoEvent amount 1..4
         self.mop_attached: bool | None = None
 
@@ -242,6 +245,25 @@ class DeebotAdapter:
         mqtt = MqttClient(mqtt_cfg, authenticator)
         await self._device.initialize(mqtt)
         log(f"connected to device: {info.api.get('deviceName')} class={info.api.get('class')}")
+
+        # The robot carries its own configured timezone and reports
+        # it in every response header ('tzm', minutes).  Verified NOT
+        # an echo of the request header: a probe declaring tzm=0 was
+        # still answered 480 (2026-11-11).  Capture it so downstream
+        # clocks follow the household's zone as the robot knows it,
+        # not a constant somebody typed into a config file.
+        try:
+            from deebot_client.commands.json.battery import GetBattery
+
+            raw_resp = await self._device.execute_command(GetBattery())
+            tzm = ((raw_resp or {}).get("resp", {}).get("header", {})
+                   or {}).get("tzm")
+            if isinstance(tzm, (int, float)) and -720 <= tzm <= 840:
+                self.device_tz_offset_hours = tzm / 60.0
+                log(f"robot reports timezone UTC"
+                    f"{self.device_tz_offset_hours:+g} (tzm={tzm} min)")
+        except Exception:  # noqa: BLE001 - best effort; config fallback
+            pass
 
         async def on_pos(event) -> None:
             for p in event.positions:

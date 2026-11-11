@@ -6,7 +6,11 @@ TZ because the code must not consult localtime at all."""
 
 import unittest
 
-from bugnav.supervisor import SessionWatch, SupervisorConfig
+from bugnav.supervisor import (
+    SessionWatch,
+    SupervisorConfig,
+    adopt_device_tz,
+)
 
 
 class TestSupervisorClock(unittest.TestCase):
@@ -23,6 +27,27 @@ class TestSupervisorClock(unittest.TestCase):
         w2 = SessionWatch(SupervisorConfig(enabled=True,
                                            tz_offset_hours=-5.0))
         self.assertEqual(w2.digest(0.0, "monitor")["now"], "19:00")
+
+    def test_adopt_device_tz(self):
+        cfg = SupervisorConfig(enabled=True)
+        adopted = adopt_device_tz(cfg, config_had_key=False,
+                                  device_hours=8.0)
+        self.assertTrue(adopted)
+        self.assertEqual(cfg.tz_offset_hours, 8.0)
+
+    def test_adopt_device_tz_respects_explicit_config(self):
+        cfg = SupervisorConfig(enabled=True, tz_offset_hours=1.0)
+        adopted = adopt_device_tz(cfg, config_had_key=True,
+                                  device_hours=8.0)
+        self.assertFalse(adopted)
+        self.assertEqual(cfg.tz_offset_hours, 1.0)
+
+    def test_adopt_device_tz_no_device_value(self):
+        cfg = SupervisorConfig(enabled=True)
+        adopted = adopt_device_tz(cfg, config_had_key=False,
+                                  device_hours=None)
+        self.assertFalse(adopted)
+        self.assertEqual(cfg.tz_offset_hours, 8.0)  # default stands
 
     def test_eta_finish_uses_config_offset(self):
         w = SessionWatch(SupervisorConfig(enabled=True))

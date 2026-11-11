@@ -347,6 +347,12 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                     f"(plan={plan}, verdict_override={verdict.resume_charge_pct})")
 
     await adapter.connect(log)
+    if sup_mod.adopt_device_tz(
+            sup_cfg,
+            config_had_key="tz_offset_hours" in raw.get("supervisor", {}),
+            device_hours=adapter.device_tz_offset_hours):
+        log(f"supervisor clock follows the robot: UTC"
+            f"{sup_cfg.tz_offset_hours:+g}")
     log(f"runner started in mode={mode}, poll={poll_s}s, "
         f"advisor={'on' if advisor_on else 'off'}, "
         f"supervisor={'on' if supervisor_on else 'off'}")

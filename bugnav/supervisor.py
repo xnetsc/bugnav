@@ -109,6 +109,19 @@ class SupervisorConfig:
     thrash_segments: int = 2  # this many short ones in a row = thrash
 
 
+def adopt_device_tz(cfg: SupervisorConfig, *, config_had_key: bool,
+                    device_hours: float | None) -> bool:
+    """Let the supervisor's clock follow the ROBOT's own reported
+    timezone offset, unless the local config set one explicitly.
+    The robot's zone is the household's ground truth (it is what
+    its schedules run on); a typed-in constant is only a fallback.
+    Returns True when the device value was adopted."""
+    if config_had_key or device_hours is None:
+        return False
+    cfg.tz_offset_hours = device_hours
+    return True
+
+
 def home_consistency(bout_cells: set, cached_cells: set,
                      cfg: SupervisorConfig) -> dict:
     """Compare a bout's footprint with the cached home baseline."""
