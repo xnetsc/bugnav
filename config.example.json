@@ -47,6 +47,8 @@
     "session_soft_cap_s": 10800,
     "episode_trigger": 6,
     "rolling_window_s": 900,
-    "water_reset_dock_s": 120
+    "water_reset_dock_s": 120,
+    "home_note": "",
+    "normal_session_max_s": 0
   }
 }

@@ -69,6 +69,12 @@ class SupervisorConfig:
     water_rate_pct_per_m2: dict = field(
         default_factory=lambda: {1: 0.8, 2: 1.2, 3: 1.8, 4: 2.4})
     water_default_amount: int = 2
+    # This household's own profile (set in the local config, kept out
+    # of the generic code): what areas a session covers and how long a
+    # NORMAL session takes here.  When set it outranks the generic
+    # duration yardsticks in the supervisor prompt.
+    home_note: str = ""
+    normal_session_max_s: float = 0.0
 
 
 @dataclass
@@ -370,6 +376,11 @@ class SessionWatch:
         if self._water_reset_t is not None and self._last is not None:
             d["minutes_since_water_reset"] = round(
                 (self._last.t - self._water_reset_t) / 60, 1)
+        if self.cfg.home_note:
+            d["home_note"] = self.cfg.home_note
+        if self.cfg.normal_session_max_s:
+            d["normal_session_max_min"] = round(
+                self.cfg.normal_session_max_s / 60)
         if home_cells:
             remaining = max(0, home_cells - len(self.cells)) * CELL_AREA_M2
             d["home_area_est_m2"] = round(home_cells * CELL_AREA_M2, 1)
@@ -398,7 +409,7 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 - 虚拟水量（water_pct_est）：无真实水位传感器，这是按「回站洗拖即补满、其后按喷水档位×拖过面积递减」推算的账面水量。低于约 20% 且短期不会回站时，拖布大概率在干拖，值得 notify 一句。
 - 充电裁决（机器人回站充电中、摘要带 deterministic_charge_plan 时）：这就是「要不要再放它出去续扫」的决策点，每一次都要重新判断，不默认放行。先过合理性这一关（见下面单场时长与作息），不合理就 stop_session；合理时默认认可规划器的 resume_soc，只有明确理由（如剩余面积小到不值得再充）才用 resume_charge_pct 覆盖。若剩余面积为 0 或极小，优先 stop_session 而不是再充再扫。
 - 单场时长与作息常识（每次裁决都要合并判断，不要孤立看任何单个数字）：
-  · 一次清扫任务的合理跨度：普通户型 1–2 小时，大户型 3–4 小时已是上限；拖到半天（约 6 小时以上）本身即不合理——除非摘要能证明面积确实巨大且推进速度正常，否则 stop_session，剩余留到下一次任务，不要为「扫完」无限续扫。一整天更不用说。
+  · 一次清扫任务的合理跨度：普通户型 1–2 小时，大户型 3–4 小时已是上限；拖到半天（约 6 小时以上）本身即不合理——除非摘要能证明面积确实巨大且推进速度正常，否则 stop_session，剩余留到下一次任务，不要为「扫完」无限续扫。一整天更不用说。摘要若带 home_note 与 normal_session_max_min，那是本户的实际清扫范围与正常时长，以它为准、通用标尺让位：本户正常上限已到、而覆盖又已完成大半，就按异常收尾处理。
   · 结合当前时刻与普通人作息：深夜至清晨（约 23:00–07:00）一般不应持续作业、更不应再放它出去续扫，除非任务开始时间表明这就是用户有意安排的时段；晚间居家时段长时间轰鸣也有打扰成本，已扫很久时倾向收尾。
   · 合并看三件事：已扫总时长（bout_elapsed_min）、预计还要多久（eta_minutes_left / eta_finish）、当前时刻（now）。已扫很久 + 还要很久 + 时段不对，任意两条叠加就应认真考虑 stop_session 并在 message 里说明。
 - 不必全覆盖（收尾宽容）：清扫没有「不遗漏任何区域」的义务，100% 覆盖不是目标，总耗时最短才是。已经扫了很久（如四五个小时）且计划区域的多数已经扫完（coverage_pct_of_home 约 85% 以上）时，剩下的零头不值得再花时间、更不值得再充一轮电去追——直接 stop_session 收尾就是合理选择，在 message 里说明已完成大部分、剩余留待下次即可。一般地，每次都要算剩余的「性价比」：剩余面积 vs 预计耗时（eta）vs 已投入时长；已投入越久，为零头继续的门槛应越高，已花的时长是沉没成本，不构成继续扫的理由。

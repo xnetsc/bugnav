@@ -311,6 +311,11 @@ class DeebotAdapter:
             await self._device.execute_command(clean_cls(CleanAction.STOP))
         elif cmd.kind == CommandKind.RESUME_AUTO:
             await self._device.execute_command(clean_cls(CleanAction.START))
+        elif cmd.kind == CommandKind.RETURN_TO_DOCK:
+            from deebot_client.commands.json import Charge
+
+            await self._device.execute_command(Charge())
+            log("sent return-to-dock (charge)")
         elif cmd.kind == CommandKind.CLEAN_AREA and cmd.point is not None:
             rect = self.to_raw_rect(cmd.point, cmd.rect_half_m)
             cls = CleanAreaV2 if self.cfg.clean_command_v2 else CleanArea

@@ -191,9 +191,14 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                 f"{verdict.message or verdict.reason}")
             state["session_stopped"] = True
             if mode == "active":
-                await dispatch([Command(CommandKind.STOP)])
+                # Stop cleaning AND send it home: a bare STOP leaves
+                # the robot sitting wherever it was; the user rule is
+                # "abnormal -> back to the station, do not keep going".
+                await dispatch([Command(CommandKind.STOP),
+                                Command(CommandKind.RETURN_TO_DOCK)])
             else:
-                log("[observe] supervisor would stop the session")
+                log("[observe] supervisor would stop the session "
+                    "and return it to the dock")
         # Charge decision: an explicit verdict override wins; otherwise
         # adopt the deterministic solver's proposal from a charge review.
         if watch.charge_review_pending or plan is not None:
@@ -234,6 +239,14 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                                 "phase": controller.phase.value,
                                 "battery": adapter.battery_pct,
                                 "water_amount": adapter.water_amount,
+                                # Live session progress: this bout's
+                                # covered cells vs the learned home
+                                # total (denominator matures over the
+                                # first bouts, then is stable).
+                                "progress_pct": (
+                                    round(100.0 * len(watch.cells)
+                                          / len(home_cells), 1)
+                                    if home_cells else None),
                             }
                         )
                         + "\n"

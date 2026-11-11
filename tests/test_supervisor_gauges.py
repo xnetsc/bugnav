@@ -133,6 +133,32 @@ class TestWaterGauge(unittest.TestCase):
         self.assertEqual(d["water_amount"], 3)
 
 
+class TestHomeProfile(unittest.TestCase):
+    def test_digest_carries_home_profile(self):
+        cfg = SupervisorConfig(
+            enabled=True,
+            home_note="public areas + study only, no bedrooms",
+            normal_session_max_s=3 * 3600)
+        w = SessionWatch(cfg)
+        _sweep(w, 10, 0.0, 100, 97)
+        d = w.digest(1_700_000_000.0, "monitor")
+        self.assertEqual(d["home_note"],
+                         "public areas + study only, no bedrooms")
+        self.assertEqual(d["normal_session_max_min"], 180)
+
+    def test_prompt_defers_to_home_note(self):
+        # User (2026-11-11): this home cleans living/dining/kitchen/
+        # study only and normally finishes within 3 h - the household
+        # yardstick outranks the generic one.
+        self.assertIn("home_note", SYSTEM)
+
+    def test_return_to_dock_command_exists(self):
+        from bugnav.model import CommandKind
+
+        self.assertEqual(CommandKind.RETURN_TO_DOCK.value, "return_to_dock")
+        from deebot_client.commands.json import Charge  # noqa: F401
+
+
 class TestAdapterWaterWiring(unittest.TestCase):
     def test_nazy54_water_refresh_includes_get_water_info(self):
         from deebot_client.events import WaterInfoEvent

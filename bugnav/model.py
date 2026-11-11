@@ -34,6 +34,7 @@ class CommandKind(str, Enum):
     STOP = "stop"
     RESUME_AUTO = "resume_auto"
     CLEAN_AREA = "clean_area"  # go clean a small rect around `point`
+    RETURN_TO_DOCK = "return_to_dock"  # head back to the station now
     NOTIFY = "notify"
 
 
