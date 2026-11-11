@@ -290,6 +290,21 @@ class TestChargeOptions(unittest.TestCase):
         self.assertGreater(by_level[100]["charge_min_from_now"],
                            by_level[50]["charge_min_from_now"] + 30)
 
+    def test_projected_total_span_present(self):
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        _sweep(w, 40, 0.0, 100, 90)
+        d = w.digest(1_700_000_000.0 + 1000.0, "monitor",
+                     home_cells=40 + 40)
+        self.assertIn("projected_total_span_min", d)
+        self.assertGreaterEqual(d["projected_total_span_min"],
+                                d["eta_minutes_left"])
+
+    def test_prompt_total_span_bottom_line(self):
+        # User (2026-11-11): charging time must not stretch the
+        # OVERALL session span to an unacceptable extent.
+        self.assertIn("总跨度", SYSTEM)
+        self.assertIn("projected_total_span_min", SYSTEM)
+
     def test_prompt_carries_waiting_cost_logic(self):
         # User (2026-11-11): charging to 80% is unacceptable if ready
         # only 3-4 hours later; 50% buying an acceptable area can be

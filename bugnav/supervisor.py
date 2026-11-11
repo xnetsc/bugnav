@@ -506,6 +506,11 @@ class SessionWatch:
         total = clean_min + charge_min
         return {
             "eta_minutes_left": round(total, 1),
+            # The whole bout's span if this projection holds: elapsed
+            # so far + waiting/charging + remaining cleaning.  Charging
+            # must not stretch THIS number past acceptability.
+            "projected_total_span_min": round(
+                (wall - self.bout_start_wall) / 60 + total, 1),
             "eta_finish": time.strftime(
                 "%H:%M", time.localtime(wall + total * 60)),
             "eta_charges_left": charges,
@@ -608,7 +613,7 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 - 充电裁决（机器人回站充电中、摘要带 deterministic_charge_plan 时）：这就是「要不要再放它出去续扫」的决策点，每一次都要重新判断，不默认放行。先过合理性这一关（见下面单场时长与作息），不合理就 stop_session；合理时默认认可规划器的 resume_soc，只有明确理由（如剩余面积小到不值得再充）才用 resume_charge_pct 覆盖。若剩余面积为 0 或极小，优先 stop_session 而不是再充再扫。
 - 短周期反复充电（摘要 short_cycle_thrashing=true 时）：充完回来扫没多久又没电、已经反复多轮——这说明续扫电量或耗电估计根本没处理好。系统已自动把本轮续扫电量下限抬到 95%，不要再按原规划放行。结合 charge_segments 诊断：每轮出发电量（start_batt）不高，是充得太少；出发电量已高却很快耗尽（end_batt 很快见底），是耗电异常，值得 notify 用户。若已反复多轮、剩余又不多，直接 stop_session 收尾。
 - 剩余不多、却必须充电时（如还剩约 10% 面积、电量实在撑不到扫完）：这一轮充电的目标不是省时间，而是「确保足够一次扫完」。摘要的 resume_soc_to_guarantee_finish 是按当前耗电估算加安全系数算出的、足够一次扫完剩余的出发电量：裁决 resume_charge_pct 时不要低于它，没充到这个数之前不要放行续扫——为省几分钟充电去赌一把、不够再回一趟，是最亏的走法。反之剩余很多时不必死守这个数，按总耗时最优权衡。
-- 充电等待也是成本（摘要 charge_options 给每个候选续扫电量标了「还要等多久、几点能走（ready_at）、能换多少面积」）：若充到高电量（如 80%）意味着要等三四个小时，那不可接受——哪怕它名义上能保证扫完。宁可选低一档（如 50%）先扫出一个可接受的面积、把主体扫完就收尾，零头留到下次。这条与上一条「保证数」一起看：保证数低、等待短，就按保证数；保证数高到要等数小时，就降档求可接受面积，不要为最后一点面积把全天耗在充电等待上。
+- 充电等待也是成本（摘要 charge_options 给每个候选续扫电量标了「还要等多久、几点能走（ready_at）、能换多少面积」）：若充到高电量（如 80%）意味着要等三四个小时，那不可接受——哪怕它名义上能保证扫完。宁可选低一档（如 50%）先扫出一个可接受的面积、把主体扫完就收尾，零头留到下次。这条与上一条「保证数」一起看：保证数低、等待短，就按保证数；保证数高到要等数小时，就降档求可接受面积，不要为最后一点面积把全天耗在充电等待上。记住底线是整场总跨度（摘要 projected_total_span_min）：已花的时间、充电等待、剩余清扫是一个整体——这个总和被充电等待撑到不可接受的程度（如跨大半天、顶进深夜），就必须降档或收尾，不能因为「在按计划充电」就任由总时长膨胀。
 - 时段锚点：上午发起的任务，拖到下午四五点还在续扫，本身就是强收尾信号——除非剩余极少且一次能扫完，否则 stop_session，不要让它跨过晚间居家时段继续耗。
 以上是判断逻辑，不是死规则：结合摘要全貌（进度、速度、电量、时刻、已投入时长）综合裁量，拿不准时倾向于「少折腾」：要么一次充够扫完，要么干脆收尾。
 - 单场时长与作息常识（每次裁决都要合并判断，不要孤立看任何单个数字）：
