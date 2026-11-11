@@ -72,6 +72,34 @@ class TestRollingGauges(unittest.TestCase):
         self.assertIsNone(w.rolling_progress_m2_per_min())
 
 
+class TestPaceStall(unittest.TestCase):
+    def test_stall_when_no_new_coverage(self):
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        t = 0.0
+        for i in range(20):  # ~8 min jittering inside one cell
+            t += 25.0
+            w.feed(Sample(t=t, pos=Point(0.1 if i % 2 else 0.0, 0.0),
+                          state=RobotState.CLEANING),
+                   "monitor", wall=1_700_000_000.0 + t,
+                   battery=100 - i // 4)
+        self.assertTrue(w.pace_stalled())
+        d = w.digest(1_700_000_000.0 + t, "monitor")
+        self.assertTrue(d["pace_stalled"])
+        self.assertEqual(d["rolling_new_m2"], 0.0)
+
+    def test_no_stall_when_progressing(self):
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        _sweep(w, 40, 0.0, 100, 90)
+        self.assertFalse(w.pace_stalled())
+
+    def test_prompt_speed_anomaly_is_cache_free(self):
+        # User (2026-11-11): a cleaning-speed anomaly has nothing to
+        # do with total area; it must be judged at all times, even
+        # when the map cache is absent or mismatched.
+        self.assertIn("与总面积无关", SYSTEM)
+        self.assertIn("pace_stalled", SYSTEM)
+
+
 class TestEta(unittest.TestCase):
     def test_eta_no_charges_when_energy_suffices(self):
         w = SessionWatch(SupervisorConfig(enabled=True))

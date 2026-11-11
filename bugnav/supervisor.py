@@ -330,6 +330,20 @@ class SessionWatch:
             return round(new_m2 / span_min, 2)
         return None
 
+    def rolling_new_m2(self) -> float | None:
+        """New area covered inside the rolling window."""
+        span = self._rolling_span()
+        return round(span[1], 1) if span is not None else None
+
+    def pace_stalled(self) -> bool:
+        """Speed anomaly, deliberately cache-free (user 2026-11-11):
+        the rolling window passed with (almost) no NEW coverage while
+        the robot kept 'cleaning'.  Needs no home total, no remaining
+        area, no ETA - it is valid in a foreign home, on a new map,
+        everywhere, at all times."""
+        span = self._rolling_span()
+        return span is not None and span[1] < 1.0
+
     def water_pct_est(self) -> float:
         """Virtual water gauge: 100 after a station wash/refill, then
         drains by spray amount x area mopped since (user-settled model;
@@ -414,6 +428,8 @@ class SessionWatch:
             "rolling_drain_pct_per_m2": self.rolling_drain_pct_per_m2(),
             "rolling_progress_m2_per_min":
                 self.rolling_progress_m2_per_min(),
+            "rolling_new_m2": self.rolling_new_m2(),
+            "pace_stalled": self.pace_stalled(),
             "water_pct_est": self.water_pct_est(),
             "water_amount": self.water_amount,
             "water_note": "virtual gauge: 100% after each station wash/"
@@ -466,6 +482,7 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 - abandon_current：当前这一个绕障 episode 明显在空转，放弃它、其余继续。
 - stop_session：整个任务已失去意义（反复打扫、长时间无有效进展、剩余无几却要再充一轮电等），直接结束。
 - 预计完成时间（摘要带 eta_finish / eta_minutes_left 时）：这是按当前滚动推进速度与滚动耗电率推算的完工时刻（含预计充电轮次）。若 eta_finish 明显越界（如下午的任务拖到深夜）、或 eta_charges_left 还很多而剩余面积不大，要认真考虑 stop_session 或至少 notify，不要等软上限到了才反应。
+- 速度异常与总面积无关（任何时候都成立）：pace_stalled=true 表示最近约 15 分钟几乎没有新增覆盖、却一直在「清扫」——这本身就是异常，该 notify 或 stop 就处理，不要因为本场没有剩余面积/ETA（如地图缓存对不上、基准缺席）就跳过判断。反过来，在基准缺席的陌生大户型里，只要推进正常、重扫率低，单纯耗时长不算异常，不要把本户的时长上限硬套上去。
 - 虚拟水量（water_pct_est）：无真实水位传感器，这是按「回站洗拖即补满、其后按喷水档位×拖过面积递减」推算的账面水量。低于约 20% 且短期不会回站时，拖布大概率在干拖，值得 notify 一句。
 - 地图缓存对不上（摘要带 home_based_figures_withheld 时）：本场扫的区域与缓存的全屋面积显著不同——多半是换了地图、换了清扫房间，或把机器人带去了别处。此时摘要已扣下剩余面积/覆盖率/预计完成时间，不要拿它们做判断，按已扫时长、推进速度、重扫率照常判断即可；这件事本身值得 notify 用户一句。缓存基准会在新布局连续出现两场后自动重建，不用管。
 - 充电裁决（机器人回站充电中、摘要带 deterministic_charge_plan 时）：这就是「要不要再放它出去续扫」的决策点，每一次都要重新判断，不默认放行。先过合理性这一关（见下面单场时长与作息），不合理就 stop_session；合理时默认认可规划器的 resume_soc，只有明确理由（如剩余面积小到不值得再充）才用 resume_charge_pct 覆盖。若剩余面积为 0 或极小，优先 stop_session 而不是再充再扫。
