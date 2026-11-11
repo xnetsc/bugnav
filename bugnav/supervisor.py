@@ -37,7 +37,7 @@ import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
 
-from .chargeplan import MARGIN, ChargeModel
+from .chargeplan import MARGIN, ChargeModel, expected_total_minutes
 from .model import RobotState, Sample
 
 CELL_M = 0.5
@@ -588,9 +588,17 @@ class SessionWatch:
             options = self.charge_options(wall, remaining, charge_model)
             if options:
                 d["charge_options"] = options
+            planned_m2 = home_cells * CELL_AREA_M2
+            expected = expected_total_minutes(
+                planned_m2, charge_model or ChargeModel())
+            if expected > 0:
+                d["expected_total_min_for_planned_area"] = expected
             eta = self.estimate_eta(wall, home_cells, charge_model)
             if eta is not None:
                 d.update(eta)
+                if expected > 0:
+                    d["projected_vs_expected_ratio"] = round(
+                        eta["projected_total_span_min"] / expected, 2)
         if charge_plan is not None:
             d["deterministic_charge_plan"] = charge_plan
         return d
@@ -614,12 +622,12 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 - 短周期反复充电（摘要 short_cycle_thrashing=true 时）：充完回来扫没多久又没电、已经反复多轮——这说明续扫电量或耗电估计根本没处理好。系统已自动把本轮续扫电量下限抬到 95%，不要再按原规划放行。结合 charge_segments 诊断：每轮出发电量（start_batt）不高，是充得太少；出发电量已高却很快耗尽（end_batt 很快见底），是耗电异常，值得 notify 用户。若已反复多轮、剩余又不多，直接 stop_session 收尾。
 - 剩余不多、却必须充电时（如还剩约 10% 面积、电量实在撑不到扫完）：这一轮充电的目标不是省时间，而是「确保足够一次扫完」。摘要的 resume_soc_to_guarantee_finish 是按当前耗电估算加安全系数算出的、足够一次扫完剩余的出发电量：裁决 resume_charge_pct 时不要低于它，没充到这个数之前不要放行续扫——为省几分钟充电去赌一把、不够再回一趟，是最亏的走法。反之剩余很多时不必死守这个数，按总耗时最优权衡。
 - 充电等待也是成本（摘要 charge_options 给每个候选续扫电量标了「还要等多久、几点能走（ready_at）、能换多少面积」）：若充到高电量（如 80%）意味着要等三四个小时，那不可接受——哪怕它名义上能保证扫完。宁可选低一档（如 50%）先扫出一个可接受的面积、把主体扫完就收尾，零头留到下次。这条与上一条「保证数」一起看：保证数低、等待短，就按保证数；保证数高到要等数小时，就降档求可接受面积，不要为最后一点面积把全天耗在充电等待上。记住底线是整场总跨度（摘要 projected_total_span_min）：已花的时间、充电等待、剩余清扫是一个整体——这个总和被充电等待撑到不可接受的程度（如跨大半天、顶进深夜），就必须降档或收尾，不能因为「在按计划充电」就任由总时长膨胀。
-- 时段锚点：上午发起的任务，拖到下午四五点还在续扫，本身就是强收尾信号——除非剩余极少且一次能扫完，否则 stop_session，不要让它跨过晚间居家时段继续耗。
+- 时段锚点：上午发起的任务，拖到下午四五点还在续扫、且 projected_vs_expected_ratio 显示已明显超出与面积相称的预期（或剩余极少却还要再充一轮），是强收尾信号，stop_session；若比率正常、纯粹面积大且推进稳，不算异常。无论如何不要让它无必要地跨过晚间居家时段继续耗。
 以上是判断逻辑，不是死规则：结合摘要全貌（进度、速度、电量、时刻、已投入时长）综合裁量，拿不准时倾向于「少折腾」：要么一次充够扫完，要么干脆收尾。
 - 单场时长与作息常识（每次裁决都要合并判断，不要孤立看任何单个数字）：
-  · 一次清扫任务的合理跨度：普通户型 1–2 小时，大户型 3–4 小时已是上限；拖到半天（约 6 小时以上）本身即不合理——除非摘要能证明面积确实巨大且推进速度正常，否则 stop_session，剩余留到下一次任务，不要为「扫完」无限续扫。一整天更不用说。摘要若带 home_note 与 normal_session_max_min，那是本户的实际清扫范围与正常时长，以它为准、通用标尺让位：本户正常上限已到、而覆盖又已完成大半，就按异常收尾处理。
+  · 合理时长不看绝对钟点、看与计划面积是否相称：摘要的 expected_total_min_for_planned_area 是按合理清扫速度扫完计划面积本应花的总时间（含必要充电），projected_vs_expected_ratio 是「已花+预计总跨度」与它的比值。比值在约 1.3 以内，就是与面积相称的正常清扫——哪怕绝对时长很长也不要停；比值明显偏大（如 2 倍上下），说明效率出了问题（重扫、推进塌陷、充电策略不当），那才是不合理，应考虑 stop_session、剩余留到下一次，不要为「扫完」无限续扫。不要用写死的「几小时」一刀切。home_note 与 normal_session_max_min 是用户按自家情况给的经验参考：范围信息（扫哪些房间）照用，时长与面积推导冲突时以面积推导为准。
   · 结合当前时刻与普通人作息：深夜至清晨（约 23:00–07:00）一般不应持续作业、更不应再放它出去续扫，除非任务开始时间表明这就是用户有意安排的时段；晚间居家时段长时间轰鸣也有打扰成本，已扫很久时倾向收尾。
-  · 合并看三件事：已扫总时长（bout_elapsed_min）、预计还要多久（eta_minutes_left / eta_finish）、当前时刻（now）。已扫很久 + 还要很久 + 时段不对，任意两条叠加就应认真考虑 stop_session 并在 message 里说明。
+  · 合并看三件事：已扫时长相对面积预期是否失衡（projected_vs_expected_ratio）、预计还要多久（eta_minutes_left / eta_finish）、当前时刻（now）。比率失衡 + 还要很久 + 时段不对，任意两条叠加就应认真考虑 stop_session 并在 message 里说明。
 - 不必全覆盖（收尾宽容）：清扫没有「不遗漏任何区域」的义务，100% 覆盖不是目标，总耗时最短才是。已经扫了很久（如四五个小时）且计划区域的多数已经扫完（coverage_pct_of_home 约 85% 以上）时，剩下的零头不值得再花时间、更不值得再充一轮电去追——直接 stop_session 收尾就是合理选择，在 message 里说明已完成大部分、剩余留待下次即可。一般地，每次都要算剩余的「性价比」：剩余面积 vs 预计耗时（eta）vs 已投入时长；已投入越久，为零头继续的门槛应越高，已花的时长是沉没成本，不构成继续扫的理由。
 判断要克制：数据不足以证明异常时选 continue，不要因为单纯耗时长就停大户型的正常清扫。"""
 

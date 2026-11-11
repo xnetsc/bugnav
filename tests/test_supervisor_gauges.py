@@ -22,12 +22,16 @@ from bugnav.supervisor import (
 
 class TestReasonablenessFrame(unittest.TestCase):
     def test_prompt_carries_resume_and_routine_frame(self):
-        # User (2026-11-11): every resume is a fresh decision; half a
-        # day for one clean is unreasonable; judge with the current
-        # time and ordinary daily routine, not duration alone.
+        # User (2026-11-11): every resume is a fresh decision; judge
+        # with the current time and ordinary daily routine, not
+        # duration alone - and (09:35) duration reasonableness comes
+        # from the PLANNED AREA at a reasonable speed, never from a
+        # hardcoded hour count.
         self.assertIn("续扫", SYSTEM)
-        self.assertIn("半天", SYSTEM)
         self.assertIn("作息", SYSTEM)
+        self.assertIn("projected_vs_expected_ratio", SYSTEM)
+        self.assertIn("不要用写死的", SYSTEM)
+        self.assertNotIn("已是上限", SYSTEM)
 
     def test_prompt_carries_no_full_coverage_obligation(self):
         # User (2026-11-11): after 4-5 h with most of the planned area
@@ -312,6 +316,28 @@ class TestChargeOptions(unittest.TestCase):
         self.assertIn("charge_options", SYSTEM)
         self.assertIn("三四个小时", SYSTEM)
         self.assertIn("可接受的面积", SYSTEM)
+
+
+class TestExpectedDuration(unittest.TestCase):
+    def test_expected_minutes_scale_with_area(self):
+        from bugnav.chargeplan import ChargeModel, expected_total_minutes
+
+        m = ChargeModel()
+        small = expected_total_minutes(30.0, m)   # no charge needed
+        big = expected_total_minutes(300.0, m)    # forces charge cycles
+        self.assertGreater(small, 20)
+        self.assertLess(small, 40)
+        self.assertGreater(big, 300)
+        self.assertLess(big, 520)
+
+    def test_digest_carries_ratio(self):
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        _sweep(w, 40, 0.0, 100, 90)
+        d = w.digest(1_700_000_000.0 + 1000.0, "monitor",
+                     home_cells=80)  # planned 20 m^2
+        self.assertIn("expected_total_min_for_planned_area", d)
+        self.assertIn("projected_vs_expected_ratio", d)
+        self.assertGreater(d["projected_vs_expected_ratio"], 1.0)
 
 
 class TestHomeCacheConsistency(unittest.TestCase):

@@ -66,6 +66,40 @@ class ChargeModel:
         return max(0.0, (soc - reserve) / self.drain_pct_per_m2)
 
 
+def expected_total_minutes(planned_m2: float, model: ChargeModel,
+                           speed_m2_per_min: float = 1.1) -> float:
+    """Minutes a HEALTHY bout needs for `planned_m2`: clean at a
+    typical pace from a full battery, charging (to just enough) only
+    when the battery forces it, plus per-cycle overheads.
+
+    This is the yardstick the supervisor's reasonableness judgment
+    hangs on (user 2026-11-11): 'too long' is measured against the
+    time the PLANNED AREA should take at a reasonable speed - never
+    against a hardcoded hour count."""
+    remaining = float(planned_m2)
+    soc = 100.0
+    total = 0.0
+    guard = 0
+    while remaining > 0.5 and guard < 12:
+        guard += 1
+        cover = model.usable_m2(soc)
+        if cover <= 0:
+            break
+        cleaned = min(cover, remaining)
+        total += cleaned / speed_m2_per_min
+        remaining -= cleaned
+        soc -= cleaned * model.drain_pct_per_m2
+        if remaining > 0.5:
+            want = min(100.0, 8.0
+                       + remaining * model.drain_pct_per_m2 * MARGIN)
+            want = max(want, MIN_RESUME_SOC)
+            if want > soc:
+                total += model.charge_minutes(soc, want)
+                total += model.overhead_s / 60.0
+                soc = want
+    return round(total, 1)
+
+
 def plan_resume(now_soc: float, remaining_m2: float,
                 model: ChargeModel) -> dict:
     """Pick the resume SOC minimizing predicted remaining wall time.
