@@ -12,7 +12,12 @@ User requirements pinned here:
 import unittest
 
 from bugnav.model import Point, RobotState, Sample
-from bugnav.supervisor import SYSTEM, SessionWatch, SupervisorConfig
+from bugnav.supervisor import (
+    SYSTEM,
+    SessionWatch,
+    SupervisorConfig,
+    home_consistency,
+)
 
 
 class TestReasonablenessFrame(unittest.TestCase):
@@ -131,6 +136,73 @@ class TestWaterGauge(unittest.TestCase):
         d = w.digest(1_700_001_000.0 + tt, "monitor")
         self.assertEqual(d["water_pct_est"], 100.0)
         self.assertEqual(d["water_amount"], 3)
+
+
+class TestHomeCacheConsistency(unittest.TestCase):
+    """User (2026-11-11): robot taken to another home / new map /
+    different rooms -> cached denominators must not be reported as
+    fact, and a one-off foreign layout must not poison the cache."""
+
+    CFG = SupervisorConfig(enabled=True)
+
+    @staticmethod
+    def _grid(x0, y0, n, m):
+        return {(x0 + i, y0 + j) for i in range(n) for j in range(m)}
+
+    def test_consistency_flags_foreign_bout(self):
+        cached = self._grid(0, 0, 20, 10)          # 200 cells
+        foreign = self._grid(100, 100, 10, 5)      # 50 cells, all new
+        cons = home_consistency(
+            foreign, cached, self.CFG)
+        self.assertEqual(cons["novel_area_share"], 1.0)
+        self.assertTrue(cons["suspect"])
+        same = self._grid(0, 0, 10, 5)             # subset of cached
+        cons2 = home_consistency(
+            same, cached, self.CFG)
+        self.assertFalse(cons2["suspect"])
+
+    def test_digest_withholds_home_figures_when_suspect(self):
+        w = SessionWatch(self.CFG)
+        # Foreign sweep: 20 new cells in a far-away row.
+        _sweep(w, 20, 0.0, 100, 95, x0=200)
+        cached = self._grid(0, 0, 20, 10)
+        # Force a substantial bout footprint for the judge: the watch
+        # saw 20 cells; lower the bout minimum via cfg for this test.
+        w.cfg = SupervisorConfig(enabled=True, home_min_bout_cells=10)
+        d = w.digest(1_700_000_000.0, "monitor",
+                     home_cells=len(cached), home_set=cached)
+        self.assertIn("home_based_figures_withheld", d)
+        self.assertNotIn("remaining_est_m2", d)
+        self.assertNotIn("eta_finish", d)
+        self.assertTrue(d["home_cache"]["suspect"])
+
+    def test_digest_normal_when_consistent(self):
+        w = SessionWatch(self.CFG)
+        _sweep(w, 20, 0.0, 100, 95)  # cells (0..19, 0) in cached grid
+        cached = self._grid(0, 0, 20, 10)
+        d = w.digest(1_700_000_000.0, "monitor",
+                     home_cells=len(cached), home_set=cached)
+        self.assertIn("remaining_est_m2", d)
+        self.assertFalse(d["home_cache"]["suspect"])
+
+    def test_candidate_two_sightings_rule(self):
+        from bugnav.supervisor import candidate_decision
+
+        cached = self._grid(0, 0, 20, 10)
+        foreign1 = self._grid(100, 100, 10, 5)
+        foreign2 = self._grid(100, 100, 12, 5)  # overlaps foreign1
+        home_bout = self._grid(0, 0, 10, 5)
+        self.assertEqual(
+            candidate_decision(foreign1, cached, None, self.CFG), "stash")
+        self.assertEqual(
+            candidate_decision(foreign2, cached, foreign1, self.CFG),
+            "adopt")
+        self.assertEqual(
+            candidate_decision(home_bout, cached, foreign1, self.CFG),
+            "merge")
+        tiny = self._grid(500, 500, 3, 3)
+        self.assertEqual(
+            candidate_decision(tiny, cached, None, self.CFG), "none")
 
 
 class TestHomeProfile(unittest.TestCase):

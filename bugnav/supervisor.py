@@ -75,6 +75,51 @@ class SupervisorConfig:
     # duration yardsticks in the supervisor prompt.
     home_note: str = ""
     normal_session_max_s: float = 0.0
+    # Home-cache consistency (user 2026-11-11): the cached home area
+    # is the denominator for progress / remaining / ETA.  If a bout's
+    # area significantly mismatches the cache (robot taken to another
+    # home, new map, different rooms), those cached figures must not
+    # be reported as fact.
+    home_suspect_novel_share: float = 0.25  # >= this share of NEW cells
+    home_min_cache_cells: int = 150  # cache must be mature to be judged
+    home_min_bout_cells: int = 40  # bout must be substantial to judge
+
+
+def home_consistency(bout_cells: set, cached_cells: set,
+                     cfg: SupervisorConfig) -> dict:
+    """Compare a bout's footprint with the cached home baseline."""
+    novel = len(bout_cells - cached_cells)
+    share = novel / len(bout_cells) if bout_cells else 0.0
+    suspect = (
+        len(cached_cells) >= cfg.home_min_cache_cells
+        and len(bout_cells) >= cfg.home_min_bout_cells
+        and share >= cfg.home_suspect_novel_share
+    )
+    return {"novel_area_share": round(share, 2), "suspect": suspect}
+
+
+def candidate_decision(bout_cells: set, cached_cells: set,
+                       candidate_cells: set | None,
+                       cfg: SupervisorConfig) -> str:
+    """Bout-end cache maintenance decision.
+
+    'merge'  - bout matches the cache: fold it in, drop any candidate.
+    'stash'  - bout mismatches the cache: remember it as a candidate
+               new baseline, but do NOT adopt a one-off (the robot may
+               just be visiting another home).
+    'adopt'  - bout mismatches the cache but matches the stashed
+               candidate: the new layout repeated, adopt bout+candidate
+               as the new baseline.
+    'none'   - too small to judge; leave everything as is.
+    """
+    if len(bout_cells) < cfg.home_min_bout_cells:
+        return "none"
+    if not home_consistency(bout_cells, cached_cells, cfg)["suspect"]:
+        return "merge"
+    if candidate_cells and not home_consistency(
+            bout_cells, candidate_cells, cfg)["suspect"]:
+        return "adopt"
+    return "stash"
 
 
 @dataclass
@@ -345,7 +390,8 @@ class SessionWatch:
                home_cells: int | None = None,
                robot_state: str = "",
                charge_plan: dict | None = None,
-               charge_model: ChargeModel | None = None) -> dict:
+               charge_model: ChargeModel | None = None,
+               home_set: set | None = None) -> dict:
         revisit = 0.0
         if self.cell_entries:
             revisit = round(1.0 - len(self.cells) / self.cell_entries, 2)
@@ -381,7 +427,21 @@ class SessionWatch:
         if self.cfg.normal_session_max_s:
             d["normal_session_max_min"] = round(
                 self.cfg.normal_session_max_s / 60)
-        if home_cells:
+        consistency = (home_consistency(self.cells, home_set, self.cfg)
+                       if home_set is not None else None)
+        if consistency is not None and consistency["suspect"]:
+            # The cached denominator does not describe THIS bout (new
+            # map / other home / different rooms): report only what
+            # this bout itself proves, and say why the rest is withheld
+            # instead of feeding the judge stale-cache numbers.
+            d["home_cache"] = consistency
+            d["home_based_figures_withheld"] = (
+                "cached home area mismatches this bout; remaining / "
+                "coverage / ETA withheld until the cache re-baselines "
+                "(new layout adopted after it repeats)")
+        elif home_cells:
+            if consistency is not None:
+                d["home_cache"] = consistency
             remaining = max(0, home_cells - len(self.cells)) * CELL_AREA_M2
             d["home_area_est_m2"] = round(home_cells * CELL_AREA_M2, 1)
             d["remaining_est_m2"] = round(remaining, 1)
@@ -407,6 +467,7 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 - stop_session：整个任务已失去意义（反复打扫、长时间无有效进展、剩余无几却要再充一轮电等），直接结束。
 - 预计完成时间（摘要带 eta_finish / eta_minutes_left 时）：这是按当前滚动推进速度与滚动耗电率推算的完工时刻（含预计充电轮次）。若 eta_finish 明显越界（如下午的任务拖到深夜）、或 eta_charges_left 还很多而剩余面积不大，要认真考虑 stop_session 或至少 notify，不要等软上限到了才反应。
 - 虚拟水量（water_pct_est）：无真实水位传感器，这是按「回站洗拖即补满、其后按喷水档位×拖过面积递减」推算的账面水量。低于约 20% 且短期不会回站时，拖布大概率在干拖，值得 notify 一句。
+- 地图缓存对不上（摘要带 home_based_figures_withheld 时）：本场扫的区域与缓存的全屋面积显著不同——多半是换了地图、换了清扫房间，或把机器人带去了别处。此时摘要已扣下剩余面积/覆盖率/预计完成时间，不要拿它们做判断，按已扫时长、推进速度、重扫率照常判断即可；这件事本身值得 notify 用户一句。缓存基准会在新布局连续出现两场后自动重建，不用管。
 - 充电裁决（机器人回站充电中、摘要带 deterministic_charge_plan 时）：这就是「要不要再放它出去续扫」的决策点，每一次都要重新判断，不默认放行。先过合理性这一关（见下面单场时长与作息），不合理就 stop_session；合理时默认认可规划器的 resume_soc，只有明确理由（如剩余面积小到不值得再充）才用 resume_charge_pct 覆盖。若剩余面积为 0 或极小，优先 stop_session 而不是再充再扫。
 - 单场时长与作息常识（每次裁决都要合并判断，不要孤立看任何单个数字）：
   · 一次清扫任务的合理跨度：普通户型 1–2 小时，大户型 3–4 小时已是上限；拖到半天（约 6 小时以上）本身即不合理——除非摘要能证明面积确实巨大且推进速度正常，否则 stop_session，剩余留到下一次任务，不要为「扫完」无限续扫。一整天更不用说。摘要若带 home_note 与 normal_session_max_min，那是本户的实际清扫范围与正常时长，以它为准、通用标尺让位：本户正常上限已到、而覆盖又已完成大半，就按异常收尾处理。

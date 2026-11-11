@@ -89,16 +89,31 @@ async def _main_async(cfg_path: str, mode: str) -> None:
     sup_cfg.enabled = supervisor_on
     watch = sup_mod.SessionWatch(sup_cfg)
 
-    # ---- persistent home map (all cells ever cleaned, 0.5 m grid) and
-    # learned charge model.
+    # ---- persistent home map baseline (0.5 m grid) and learned charge
+    # model.  home_cells is the ADOPTED baseline only: bout footprints
+    # are folded in at bout end when they match it; a mismatching bout
+    # (new map / other home / different rooms) is stashed as a
+    # candidate and adopted only when the new layout repeats, so a
+    # one-off trip never poisons the denominator (user 2026-11-11).
     home_path = os.path.join(data_dir, "home_cells.json")
-    home_cells: set[tuple[int, int]] = set()
-    if os.path.exists(home_path):
+    candidate_path = os.path.join(data_dir, "home_candidate.json")
+
+    def _load_cells(path):
         try:
-            with open(home_path, encoding="utf-8") as f:
-                home_cells = {tuple(c) for c in json.load(f)["cells"]}
+            with open(path, encoding="utf-8") as f:
+                return {tuple(c) for c in json.load(f)["cells"]}
         except Exception:
-            home_cells = set()
+            return set()
+
+    def _save_cells(path, cells):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"cells": sorted(cells)}, f)
+
+    home_cells: set[tuple[int, int]] = (
+        _load_cells(home_path) if os.path.exists(home_path) else set())
+    candidate_cells: set[tuple[int, int]] | None = (
+        _load_cells(candidate_path)
+        if os.path.exists(candidate_path) else None)
     model_path = os.path.join(data_dir, "charge_model.json")
     charge_model = ChargeModel()
     if os.path.exists(model_path):
@@ -119,7 +134,38 @@ async def _main_async(cfg_path: str, mode: str) -> None:
         "charge_target": None,  # resume at this battery % (one-shot)
         "session_stopped": False,
         "last_home_save": 0.0,
+        "bout_was_open": False,
     }
+
+    def _maintain_home_cache() -> None:
+        """Bout-end cache maintenance (see candidate_decision)."""
+        nonlocal candidate_cells
+        bout = set(watch.cells)
+        decision = sup_mod.candidate_decision(
+            bout, home_cells, candidate_cells, sup_cfg)
+        if decision == "merge":
+            if bout - home_cells:
+                home_cells.update(bout)
+                _save_cells(home_path, home_cells)
+            if candidate_cells is not None:
+                candidate_cells = None
+                if os.path.exists(candidate_path):
+                    os.remove(candidate_path)
+        elif decision == "stash":
+            cons = sup_mod.home_consistency(bout, home_cells, sup_cfg)
+            candidate_cells = bout
+            _save_cells(candidate_path, candidate_cells)
+            log(f"NOTIFY: 本场清扫区域与缓存地图显著不同（新面积占比 "
+                f"{cons['novel_area_share']:.0%}），进度/剩余已停用缓存口径；"
+                "若新布局再出现一场，将采用为新基准")
+        elif decision == "adopt":
+            home_cells.clear()
+            home_cells.update((candidate_cells or set()) | bout)
+            _save_cells(home_path, home_cells)
+            candidate_cells = None
+            if os.path.exists(candidate_path):
+                os.remove(candidate_path)
+            log("NOTIFY: 新布局已连续出现两场，全屋面积基准已按新布局重建")
 
     async def dispatch(cmds) -> None:
         for cmd in cmds:
@@ -156,7 +202,8 @@ async def _main_async(cfg_path: str, mode: str) -> None:
             return
         plan = None
         remaining = None
-        if home_cells:
+        if home_cells and not sup_mod.home_consistency(
+                watch.cells, home_cells, sup_cfg)["suspect"]:
             remaining = max(
                 0, len(home_cells) - len(watch.cells)) * sup_mod.CELL_AREA_M2
         if (sample.state == RobotState.DOCKED and watch.bout_open
@@ -170,7 +217,7 @@ async def _main_async(cfg_path: str, mode: str) -> None:
             time.time(), controller.phase.value,
             home_cells=len(home_cells) or None,
             robot_state=sample.state.value, charge_plan=plan,
-            charge_model=charge_model)
+            charge_model=charge_model, home_set=home_cells)
         verdict = sup_mod.Verdict()
         try:
             text = await llm_mod.chat(sup_mod.build_messages(digest))
@@ -239,30 +286,27 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                                 "phase": controller.phase.value,
                                 "battery": adapter.battery_pct,
                                 "water_amount": adapter.water_amount,
-                                # Live session progress: this bout's
-                                # covered cells vs the learned home
-                                # total (denominator matures over the
-                                # first bouts, then is stable).
+                                # Live session progress vs the
+                                # ADOPTED home baseline (only once the
+                                # baseline is mature; clamped at 100 -
+                                # a foreign bout can outgrow it, and the
+                                # digest flags that case separately).
                                 "progress_pct": (
-                                    round(100.0 * len(watch.cells)
-                                          / len(home_cells), 1)
-                                    if home_cells else None),
+                                    round(min(100.0, 100.0 * len(watch.cells)
+                                              / len(home_cells)), 1)
+                                    if len(home_cells)
+                                    >= sup_cfg.home_min_cache_cells
+                                    else None),
                             }
                         )
                         + "\n"
                     )
-                if sample.state == RobotState.CLEANING:
-                    cell = (round(sample.pos.x / sup_mod.CELL_M),
-                            round(sample.pos.y / sup_mod.CELL_M))
-                    if cell not in home_cells:
-                        home_cells.add(cell)
-                        if wall - state["last_home_save"] > 300:
-                            state["last_home_save"] = wall
-                            with open(home_path, "w", encoding="utf-8") as f:
-                                json.dump({"cells": sorted(home_cells)}, f)
                 watch.feed(sample, controller.phase.value, wall,
                            battery=adapter.battery_pct,
                            water_amount=adapter.water_amount)
+                if state["bout_was_open"] and not watch.bout_open:
+                    _maintain_home_cache()
+                state["bout_was_open"] = watch.bout_open
                 if not state["session_stopped"]:
                     await dispatch(controller.tick(sample))
                 # episode strategist servicing
