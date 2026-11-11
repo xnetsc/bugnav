@@ -261,14 +261,20 @@ class TestGuaranteeSoc(unittest.TestCase):
         self.assertLessEqual(big, 100)
 
     def test_prompt_carries_guarantee_and_afternoon_anchor(self):
-        # User (2026-11-11): with ~10% left and a charge unavoidable,
-        # charge enough to GUARANTEE finishing, and do not resume
-        # before that; a morning task still resuming at 16-17:00 is a
-        # stop signal.  These are judgment logic for the LLM, fed with
-        # computed figures - not hardcoded rules.
+        # User (2026-11-11): the guarantee figure prices the
+        # one-shot end of a balance (finish-remaining-in-one-go vs
+        # splitting into more charge cycles and paying each cycle's
+        # overhead); the LLM weighs both ends, nothing is a floor.
+        # A morning task still resuming at 16-17:00 is a stop signal.
+        # All judgment logic for the LLM - not hardcoded rules.
         self.assertIn("resume_soc_to_guarantee_finish", SYSTEM)
-        self.assertIn("确保足够一次扫完", SYSTEM)
-        self.assertIn("没充到这个数之前不要放行续扫", SYSTEM)
+        self.assertIn("一口气扫完剩余", SYSTEM)
+        # User (2026-11-11): the guarantee figure is one END of a
+        # balance (one-shot finish vs multi-cycle overhead losses),
+        # not a hardcoded floor that must be reached before resuming.
+        self.assertIn("平衡题", SYSTEM)
+        self.assertNotIn("不要低于它", SYSTEM)
+        self.assertNotIn("没充到这个数之前不要放行", SYSTEM)
         self.assertIn("四五点", SYSTEM)
         self.assertIn("不是死规则", SYSTEM)
 
