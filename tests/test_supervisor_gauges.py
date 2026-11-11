@@ -166,6 +166,77 @@ class TestWaterGauge(unittest.TestCase):
         self.assertEqual(d["water_amount"], 3)
 
 
+def _run_segment(w, t, minutes, cells, batt0, batt1, x_start):
+    """Feed one cleaning segment (10 s samples, fresh cells along a
+    row starting at cell x_start).  Returns the new t."""
+    samples = int(minutes * 6)
+    per = max(1, samples // max(1, cells))
+    for i in range(samples):
+        t += 10.0
+        idx = min(cells - 1, i // per) if cells else 0
+        batt = round(batt0 + (batt1 - batt0) * (i / max(1, samples - 1)))
+        w.feed(Sample(t=t, pos=Point((x_start + idx) * 0.5, 0.0),
+                      state=RobotState.CLEANING),
+               "monitor", wall=1_700_000_000.0 + t, battery=batt)
+    return t
+
+
+def _dock(w, t, batt):
+    w.feed(Sample(t=t + 10.0, pos=Point(0, 0), state=RobotState.RETURNING),
+           "monitor", wall=1_700_000_000.0 + t + 10.0, battery=batt)
+    w.feed(Sample(t=t + 20.0, pos=Point(0, 0), state=RobotState.DOCKED),
+           "monitor", wall=1_700_000_000.0 + t + 20.0, battery=batt)
+    return t + 20.0
+
+
+class TestChargeThrash(unittest.TestCase):
+    """User (2026-11-11): charged -> resumed -> flat again in no time,
+    repeatedly, means the resume-level handling is broken.  Detect it
+    from the segment ledger and force a high resume floor."""
+
+    def test_thrash_detected_after_two_short_post_charge_segments(self):
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        t = _run_segment(w, 0.0, 60, 80, 100, 18, 0)     # healthy first
+        t = _dock(w, t, 18)
+        t = _run_segment(w, t, 10, 12, 60, 15, 200)      # short, low end
+        t = _dock(w, t, 15)
+        t = _run_segment(w, t, 8, 10, 55, 12, 400)       # short again
+        t = _dock(w, t, 12)
+        self.assertEqual(len(w.segments), 3)
+        self.assertFalse(w.segments[0]["after_charge"])
+        self.assertTrue(w.segments[1]["after_charge"])
+        self.assertTrue(w.short_cycle_thrash())
+        d = w.digest(1_700_000_000.0 + t, "monitor")
+        self.assertTrue(d["short_cycle_thrashing"])
+        self.assertEqual(len(d["charge_segments"]), 3)
+
+    def test_long_post_charge_segments_are_not_thrash(self):
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        t = _run_segment(w, 0.0, 60, 80, 100, 18, 0)
+        t = _dock(w, t, 18)
+        t = _run_segment(w, t, 45, 60, 80, 20, 200)
+        t = _dock(w, t, 20)
+        t = _run_segment(w, t, 40, 55, 85, 22, 400)
+        t = _dock(w, t, 22)
+        self.assertFalse(w.short_cycle_thrash())
+
+    def test_wash_return_segment_does_not_count(self):
+        # A short segment ending at HIGH battery is a mop-wash return,
+        # not a charge cycle - it must not feed the thrash detector.
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        t = _run_segment(w, 0.0, 60, 80, 100, 70, 0)
+        t = _dock(w, t, 70)
+        t = _run_segment(w, t, 8, 10, 72, 65, 200)   # short, ends high
+        t = _dock(w, t, 65)
+        t = _run_segment(w, t, 8, 10, 60, 12, 400)   # short, ends low
+        t = _dock(w, t, 12)
+        self.assertFalse(w.short_cycle_thrash())
+
+    def test_prompt_carries_thrash_logic(self):
+        self.assertIn("短周期", SYSTEM)
+        self.assertIn("short_cycle_thrashing", SYSTEM)
+
+
 class TestHomeCacheConsistency(unittest.TestCase):
     """User (2026-11-11): robot taken to another home / new map /
     different rooms -> cached denominators must not be reported as

@@ -252,6 +252,16 @@ async def _main_async(cfg_path: str, mode: str) -> None:
             target = verdict.resume_charge_pct
             if target is None and plan is not None:
                 target = plan["resume_soc"]
+            if watch.short_cycle_thrash() and verdict.action == "continue":
+                # Charged, resumed, flat again in no time, repeatedly:
+                # the resume level is being handled wrong.  Force a
+                # high floor so the next outing actually lasts
+                # (user 2026-11-11).
+                floor = sup_cfg.thrash_resume_floor_pct
+                if target is None or target < floor:
+                    target = floor
+                    log(f"NOTIFY: 检测到短周期反复充电（充完回来扫没多久"
+                        f"又没电），本轮续扫电量下限已自动抬到 {floor}%")
             if target is not None and verdict.action == "continue":
                 state["charge_target"] = target
                 log(f"charge plan: resume at {target}% "

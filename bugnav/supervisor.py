@@ -83,6 +83,17 @@ class SupervisorConfig:
     home_suspect_novel_share: float = 0.25  # >= this share of NEW cells
     home_min_cache_cells: int = 150  # cache must be mature to be judged
     home_min_bout_cells: int = 40  # bout must be substantial to judge
+    # Short-cycle charge thrashing (user 2026-11-11): charged, resumed,
+    # flat again in no time, repeatedly = the resume level / drain
+    # handling is broken.  A segment counts toward thrashing when it
+    # started after a charge stop, ENDED at low battery (a mop-wash
+    # return ends at whatever charge - it must not count), and bought
+    # little cleaning: short on time OR small on area.
+    short_segment_max_min: float = 20.0
+    short_segment_max_m2: float = 8.0
+    thrash_end_batt_max: int = 30  # segment must end at/below this
+    thrash_segments: int = 2  # this many short ones in a row = thrash
+    thrash_resume_floor_pct: int = 95  # forced resume floor on thrash
 
 
 def home_consistency(bout_cells: set, cached_cells: set,
@@ -167,6 +178,16 @@ class SessionWatch:
         self._water_cells: set[tuple[int, int]] = set()
         self._water_reset_t: float | None = None  # sample.t of last reset
         self._water_reset_this_stay = False
+        # Per-segment ledger: one entry per continuous cleaning run
+        # between dockings (duration / area / start+end battery /
+        # whether it began right after a charge stop).
+        self.segments: list[dict] = []
+        self._seg_open = False
+        self._seg_clean_s = 0.0
+        self._seg_cells0 = 0
+        self._seg_batt0: int | None = None
+        self._seg_after_charge = False
+        self._had_dock_this_bout = False
 
     # ------------------------------------------------------------ feeding
     def feed(self, sample: Sample, phase: str, wall: float,
@@ -192,6 +213,9 @@ class SessionWatch:
                 self.errors = Counter()
                 self.bout_start_battery = self.battery_pct
                 self._history.clear()
+                self.segments = []
+                self._seg_open = False
+                self._had_dock_this_bout = False
                 # Leaving the station for a fresh bout = just washed
                 # and refilled: the virtual water gauge starts full.
                 self._water_cells = set()
@@ -199,6 +223,17 @@ class SessionWatch:
             self.cleaning_now = True
             self._docked_since_t = None
             self._water_reset_this_stay = False
+            if not self._seg_open:
+                self._seg_open = True
+                self._seg_clean_s = 0.0
+                self._seg_cells0 = len(self.cells)
+                self._seg_batt0 = self.battery_pct
+                # Consume the dock flag: only the segment that starts
+                # right after a docking counts as "after charge" (a
+                # later pause/resume must not inherit it).
+                self._seg_after_charge = self._had_dock_this_bout
+                self._had_dock_this_bout = False
+            self._seg_clean_s += dt
             self.bout_cleaning_s += dt
             self.cleaning_since_review_s += dt
             if last is not None:
@@ -217,9 +252,13 @@ class SessionWatch:
                        > self.cfg.rolling_window_s):
                     self._history.popleft()
         elif state == RobotState.RETURNING:
+            self._close_segment()
             self.cleaning_now = False
             self._was_returning = True
         elif state in (RobotState.DOCKED, RobotState.IDLE):
+            self._close_segment()
+            if state == RobotState.DOCKED:
+                self._had_dock_this_bout = True
             if self.cleaning_now or self._was_returning:
                 if state == RobotState.DOCKED:
                     self.dock_returns += 1
@@ -260,6 +299,36 @@ class SessionWatch:
             self.episodes_since_review += 1
         self._last_phase = phase
         self._last = sample
+
+    def _close_segment(self) -> None:
+        if not self._seg_open:
+            return
+        self._seg_open = False
+        self.segments.append({
+            "clean_min": round(self._seg_clean_s / 60, 1),
+            "area_m2": round(
+                (len(self.cells) - self._seg_cells0) * CELL_AREA_M2, 1),
+            "start_batt": self._seg_batt0,
+            "end_batt": self.battery_pct,
+            "after_charge": self._seg_after_charge,
+        })
+
+    def short_cycle_thrash(self) -> bool:
+        """The last `thrash_segments` charge-driven segments were all
+        short: the resume level / drain handling is not working."""
+        segs = [
+            s for s in self.segments
+            if s["after_charge"]
+            and s["end_batt"] is not None
+            and s["end_batt"] <= self.cfg.thrash_end_batt_max
+        ]
+        if len(segs) < self.cfg.thrash_segments:
+            return False
+        recent = segs[-self.cfg.thrash_segments:]
+        return all(
+            s["clean_min"] < self.cfg.short_segment_max_min
+            or s["area_m2"] < self.cfg.short_segment_max_m2
+            for s in recent)
 
     # ------------------------------------------------------------ review
     def due(self) -> bool:
@@ -430,6 +499,8 @@ class SessionWatch:
                 self.rolling_progress_m2_per_min(),
             "rolling_new_m2": self.rolling_new_m2(),
             "pace_stalled": self.pace_stalled(),
+            "charge_segments": self.segments[-4:],
+            "short_cycle_thrashing": self.short_cycle_thrash(),
             "water_pct_est": self.water_pct_est(),
             "water_amount": self.water_amount,
             "water_note": "virtual gauge: 100% after each station wash/"
@@ -486,6 +557,7 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 - 虚拟水量（water_pct_est）：无真实水位传感器，这是按「回站洗拖即补满、其后按喷水档位×拖过面积递减」推算的账面水量。低于约 20% 且短期不会回站时，拖布大概率在干拖，值得 notify 一句。
 - 地图缓存对不上（摘要带 home_based_figures_withheld 时）：本场扫的区域与缓存的全屋面积显著不同——多半是换了地图、换了清扫房间，或把机器人带去了别处。此时摘要已扣下剩余面积/覆盖率/预计完成时间，不要拿它们做判断，按已扫时长、推进速度、重扫率照常判断即可；这件事本身值得 notify 用户一句。缓存基准会在新布局连续出现两场后自动重建，不用管。
 - 充电裁决（机器人回站充电中、摘要带 deterministic_charge_plan 时）：这就是「要不要再放它出去续扫」的决策点，每一次都要重新判断，不默认放行。先过合理性这一关（见下面单场时长与作息），不合理就 stop_session；合理时默认认可规划器的 resume_soc，只有明确理由（如剩余面积小到不值得再充）才用 resume_charge_pct 覆盖。若剩余面积为 0 或极小，优先 stop_session 而不是再充再扫。
+- 短周期反复充电（摘要 short_cycle_thrashing=true 时）：充完回来扫没多久又没电、已经反复多轮——这说明续扫电量或耗电估计根本没处理好。系统已自动把本轮续扫电量下限抬到 95%，不要再按原规划放行。结合 charge_segments 诊断：每轮出发电量（start_batt）不高，是充得太少；出发电量已高却很快耗尽（end_batt 很快见底），是耗电异常，值得 notify 用户。若已反复多轮、剩余又不多，直接 stop_session 收尾。
 - 单场时长与作息常识（每次裁决都要合并判断，不要孤立看任何单个数字）：
   · 一次清扫任务的合理跨度：普通户型 1–2 小时，大户型 3–4 小时已是上限；拖到半天（约 6 小时以上）本身即不合理——除非摘要能证明面积确实巨大且推进速度正常，否则 stop_session，剩余留到下一次任务，不要为「扫完」无限续扫。一整天更不用说。摘要若带 home_note 与 normal_session_max_min，那是本户的实际清扫范围与正常时长，以它为准、通用标尺让位：本户正常上限已到、而覆盖又已完成大半，就按异常收尾处理。
   · 结合当前时刻与普通人作息：深夜至清晨（约 23:00–07:00）一般不应持续作业、更不应再放它出去续扫，除非任务开始时间表明这就是用户有意安排的时段；晚间居家时段长时间轰鸣也有打扰成本，已扫很久时倾向收尾。
