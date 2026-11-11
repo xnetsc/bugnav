@@ -27,7 +27,11 @@ from .chargeplan import ChargeModel, plan_resume
 from .controller import BugNavController, ControllerConfig
 from .deebot_adapter import AdapterConfig, DeebotAdapter
 from .model import Command, CommandKind, RobotState
-from .network import is_transient_network_error, retry_forever
+from .network import (
+    LinkWatchdog,
+    is_transient_network_error,
+    retry_forever,
+)
 
 
 def _load_json(path: str) -> dict:
@@ -469,28 +473,72 @@ async def _main_async(cfg_path: str, mode: str) -> None:
         dn = adapter.device_now()
         return dn if dn is not None else time.time()
 
-    if sup_mod.adopt_device_tz(
-            sup_cfg,
-            config_had_key="tz_offset_hours" in raw.get("supervisor", {}),
-            device_hours=adapter.device_tz_offset_hours):
-        log(f"supervisor clock follows the robot: UTC"
-            f"{sup_cfg.tz_offset_hours:+g}")
-    # The container's own local time adopts the same zone, so no TZ
-    # needs to be preset in the deployment at all: from here on,
-    # even the local-time fallback speaks the robot's zone.
-    if hasattr(time, "tzset"):
-        os.environ["TZ"] = _posix_tz(sup_cfg.tz_offset_hours)
-        time.tzset()
-        log(f"container local time adopted from the robot: UTC"
-            f"{sup_cfg.tz_offset_hours:+g}")
+    def _adopt_robot_clock() -> None:
+        """Point every clock we own at the robot's reported zone:
+        the supervisor's rendering offset, and the process-local
+        time itself (so no TZ needs to be preset in the deployment
+        at all: from here on, even the local-time fallback speaks
+        the robot's zone).  Runs at startup and after reconnects."""
+        if sup_mod.adopt_device_tz(
+                sup_cfg,
+                config_had_key="tz_offset_hours" in raw.get("supervisor", {}),
+                device_hours=adapter.device_tz_offset_hours):
+            log(f"supervisor clock follows the robot: UTC"
+                f"{sup_cfg.tz_offset_hours:+g}")
+        if hasattr(time, "tzset"):
+            os.environ["TZ"] = _posix_tz(sup_cfg.tz_offset_hours)
+            time.tzset()
+            log(f"container local time adopted from the robot: UTC"
+                f"{sup_cfg.tz_offset_hours:+g}")
+
+    _adopt_robot_clock()
     log(f"runner started in mode={mode}, poll={poll_s}s, "
         f"advisor={'on' if advisor_on else 'off'}, "
         f"supervisor={'on' if supervisor_on else 'off'}")
+
+    watchdog = LinkWatchdog()
+
+    async def _reconnect(down_since: float) -> None:
+        """Re-establish the cloud link, retrying indefinitely at a
+        paced backoff - the daemon must come back on its own when
+        the network returns, however long the outage lasted (user
+        2026-11-11: 需要维持重试，网络恢复后可以恢复).  Unlike
+        startup, ANY failure is retried here: a login token that
+        expired mid-outage is healed by the fresh login this
+        performs, and the 60s cap keeps it a reasonable frequency."""
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                await _connect_once()
+                break
+            except Exception as exc:  # noqa: BLE001 - keep trying
+                delay = min(60.0, 15.0 * (2 ** min(attempt - 1, 2)))
+                log(f"reconnect attempt {attempt} failed "
+                    f"({type(exc).__name__}); next try in {delay:.0f}s")
+                await asyncio.sleep(delay)
+        _adopt_robot_clock()
+        log(f"cloud link restored after "
+            f"{(time.monotonic() - down_since) / 60.0:.1f} min; "
+            f"monitoring resumes")
+
     last_refresh = 0.0
     while True:
         now = time.monotonic()
         if now - last_refresh >= poll_s:
             last_refresh = now
+            if watchdog.ping_due(now):
+                watchdog.note_ping_started(now)
+                link_ok = await adapter.ping()
+                if watchdog.note_result(
+                        now, ping_ok=link_ok,
+                        last_contact_t=adapter.last_contact_t):
+                    log("cloud link down (repeated failed checks); "
+                        "reconnecting, and will keep retrying until "
+                        "the network returns")
+                    await _reconnect(now)
+                    watchdog.note_recovered()
+                    last_refresh = time.monotonic()
             adapter.request_refresh()
             sample = adapter.sample(now)
             if sample is not None:

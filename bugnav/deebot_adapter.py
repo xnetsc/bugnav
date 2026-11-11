@@ -109,6 +109,10 @@ class DeebotAdapter:
         self._state = RobotState.UNKNOWN
         self._error = 0
         self._last_pos_t = 0.0
+        # Monotonic instant of the last PROOF the cloud link is
+        # alive: a command response or an incoming event.  The
+        # runner's link watchdog reads it (see network.LinkWatchdog).
+        self._last_contact_t: float | None = None
         self.battery_pct: int | None = None  # latest BatteryEvent value
         # Robot-reported UTC offset in hours (response header 'tzm'),
         # captured at connect; None when the capture failed.
@@ -298,21 +302,26 @@ class DeebotAdapter:
             pass
 
         async def on_pos(event) -> None:
+            self._last_contact_t = time.monotonic()
             for p in event.positions:
                 if p.type == PositionType.DEEBOT:
                     self._pos_raw = (p.x, p.y, p.a)
                     self._last_pos_t = time.monotonic()
 
         async def on_state(event) -> None:
+            self._last_contact_t = time.monotonic()
             self._state = _STATE_MAP.get(event.state, RobotState.UNKNOWN)
 
         async def on_error(event) -> None:
+            self._last_contact_t = time.monotonic()
             self._error = int(event.code or 0)
 
         async def on_battery(event) -> None:
+            self._last_contact_t = time.monotonic()
             self.battery_pct = int(event.value)
 
         async def on_water(event) -> None:
+            self._last_contact_t = time.monotonic()
             # Spray-amount setting (level), not a remaining level - the
             # firmware exposes no tank level at all.  If this firmware
             # rejects getWaterInfo the event simply never fires and
@@ -331,8 +340,32 @@ class DeebotAdapter:
         self._BatteryEvent = BatteryEvent
         self._WaterInfoEvent = WaterInfoEvent
 
+    @property
+    def last_contact_t(self) -> float | None:
+        """Monotonic instant of the last proven cloud contact."""
+        return self._last_contact_t
+
+    async def ping(self) -> bool:
+        """One cheap cloud round-trip (a battery read - a query, so
+        it is observe-safe).  True when the cloud answered.  False
+        on ANY failure: a token expired during a long outage fails
+        here too, and the watchdog's answer to that is the same
+        reconnect-with-fresh-login.  Deliberately no retry inside:
+        the watchdog owns the pacing."""
+        if self._device is None:
+            return False
+        try:
+            from deebot_client.commands.json import GetBattery
+
+            raw = await self._device.execute_command(GetBattery())
+        except Exception:  # noqa: BLE001 - verdict is binary
+            return False
+        self._note_device_clock(raw)
+        return True
+
     def _note_device_clock(self, raw) -> None:
         """Adopt the robot's clock basis from a command response."""
+        self._last_contact_t = time.monotonic()
         header = ((raw or {}).get("resp", {}) or {}).get("header")
         parsed = parse_device_clock(header, time.monotonic())
         if parsed is None:

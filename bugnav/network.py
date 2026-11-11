@@ -57,6 +57,52 @@ async def call_with_retry(factory, *, log, what: str,
             await sleep(delay)
 
 
+class LinkWatchdog:
+    """Decides when the cloud link needs a full reconnect.
+
+    Reads alone (refresh requests) recover by themselves when the
+    network returns, but a long outage can strand the session for
+    good - an expired token or a dead MQTT client never heals, and
+    nothing downstream would notice.  The watchdog pings the cloud
+    on a slow cadence and, after `fails_to_reconnect` consecutive
+    failures, sends the runner into its reconnect loop, which keeps
+    trying until the network is back (user 2026-11-11: 需要维持
+    重试，网络恢复后可以恢复).  Incoming robot events count as
+    contact too: while the robot is pushing positions, the link is
+    proven alive and the ping is skipped."""
+
+    def __init__(self, ping_interval_s: float = 60.0,
+                 fails_to_reconnect: int = 3,
+                 contact_fresh_s: float = 120.0):
+        self.ping_interval_s = ping_interval_s
+        self.fails_to_reconnect = fails_to_reconnect
+        self.contact_fresh_s = contact_fresh_s
+        self._last_ping_t: float | None = None
+        self._fails = 0
+
+    def ping_due(self, now: float) -> bool:
+        return (self._last_ping_t is None
+                or now - self._last_ping_t >= self.ping_interval_s)
+
+    def note_ping_started(self, now: float) -> None:
+        self._last_ping_t = now
+
+    def note_result(self, now: float, *, ping_ok: bool,
+                    last_contact_t: float | None) -> bool:
+        """Fold one ping outcome in; True means: reconnect now."""
+        fresh = (last_contact_t is not None
+                 and now - last_contact_t <= self.contact_fresh_s)
+        if ping_ok or fresh:
+            self._fails = 0
+            return False
+        self._fails += 1
+        return self._fails >= self.fails_to_reconnect
+
+    def note_recovered(self) -> None:
+        self._fails = 0
+        self._last_ping_t = None
+
+
 async def retry_forever(factory, *, log, what: str,
                         base_delay: float = 15.0,
                         max_delay: float = 60.0,

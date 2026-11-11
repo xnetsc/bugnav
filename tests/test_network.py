@@ -119,3 +119,53 @@ class TestRetryForever(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLinkWatchdog(unittest.TestCase):
+    def setUp(self):
+        from bugnav.network import LinkWatchdog
+        self.wd = LinkWatchdog(ping_interval_s=60.0,
+                               fails_to_reconnect=3,
+                               contact_fresh_s=120.0)
+
+    def test_ping_cadence(self):
+        self.assertTrue(self.wd.ping_due(0.0))
+        self.wd.note_ping_started(0.0)
+        self.assertFalse(self.wd.ping_due(59.0))
+        self.assertTrue(self.wd.ping_due(60.0))
+
+    def test_three_failures_trigger_reconnect(self):
+        stale = None
+        self.assertFalse(self.wd.note_result(
+            0.0, ping_ok=False, last_contact_t=stale))
+        self.assertFalse(self.wd.note_result(
+            60.0, ping_ok=False, last_contact_t=stale))
+        self.assertTrue(self.wd.note_result(
+            120.0, ping_ok=False, last_contact_t=stale))
+
+    def test_success_resets_failure_count(self):
+        self.wd.note_result(0.0, ping_ok=False, last_contact_t=None)
+        self.wd.note_result(60.0, ping_ok=False, last_contact_t=None)
+        self.assertFalse(self.wd.note_result(
+            120.0, ping_ok=True, last_contact_t=None))
+        self.assertFalse(self.wd.note_result(
+            180.0, ping_ok=False, last_contact_t=None))
+        self.assertFalse(self.wd.note_result(
+            240.0, ping_ok=False, last_contact_t=None))
+
+    def test_fresh_events_rescue_a_failed_ping(self):
+        # The ping raced a reconnect inside the library, but the
+        # robot pushed an event 10s ago: the link is proven alive.
+        self.wd.note_result(0.0, ping_ok=False, last_contact_t=None)
+        self.wd.note_result(60.0, ping_ok=False, last_contact_t=None)
+        self.assertFalse(self.wd.note_result(
+            1000.0, ping_ok=False, last_contact_t=990.0))
+
+    def test_recovered_resets(self):
+        for i in range(3):
+            self.wd.note_result(60.0 * i, ping_ok=False,
+                                last_contact_t=None)
+        self.wd.note_recovered()
+        self.assertFalse(self.wd.note_result(
+            1000.0, ping_ok=False, last_contact_t=None))
+        self.assertTrue(self.wd.ping_due(1000.0))

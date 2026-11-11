@@ -6,6 +6,7 @@ device epoch ms as a string, 'tzm' = offset minutes; live capture
 2026-11-11: ts '1794374247626', tzm 480) and device_now projects
 that basis forward on the monotonic clock."""
 
+import asyncio
 import time
 import unittest
 
@@ -88,3 +89,33 @@ class TestDeviceNowAt(unittest.TestCase):
     def test_no_basis(self):
         adapter = DeebotAdapter(AdapterConfig(account_id="x"))
         self.assertIsNone(adapter.device_now_at(1.0))
+
+
+class TestPing(unittest.TestCase):
+    def _adapter_with_device(self, behaviour):
+        adapter = DeebotAdapter(AdapterConfig(
+            account_id="probe", device_name=""))
+
+        class _FakeDevice:
+            async def execute_command(self, command):
+                if behaviour == "raise":
+                    raise ConnectionError("cloud unreachable")
+                return {"resp": {"header": {
+                    "ts": "1794374247626", "tzm": 480}}}
+
+        adapter._device = _FakeDevice()
+        return adapter
+
+    def test_ping_success_marks_contact(self):
+        adapter = self._adapter_with_device("ok")
+        self.assertTrue(asyncio.run(adapter.ping()))
+        self.assertIsNotNone(adapter.last_contact_t)
+
+    def test_ping_failure_is_false_not_an_exception(self):
+        adapter = self._adapter_with_device("raise")
+        self.assertFalse(asyncio.run(adapter.ping()))
+
+    def test_ping_without_device(self):
+        adapter = DeebotAdapter(AdapterConfig(
+            account_id="probe", device_name=""))
+        self.assertFalse(asyncio.run(adapter.ping()))
