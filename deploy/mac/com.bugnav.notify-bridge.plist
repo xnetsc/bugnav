@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- bugnav notification bridge: launchd agent (per-user, at login).
+
+     Before loading, replace __YOUR_IMESSAGE_HANDLE__ with your own
+     iMessage handle (mobile number or Apple ID email) so alerts also
+     reach your iPhone via Messages.  Leave it empty (just "") for
+     Mac-only banners.
+
+     Install:
+       cp notify-bridge.py ~/bugnav/
+       cp com.bugnav.notify-bridge.plist ~/Library/LaunchAgents/
+       launchctl load ~/Library/LaunchAgents/com.bugnav.notify-bridge.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.bugnav.notify-bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/mccoy/bugnav/notify-bridge.py</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BUGNAV_IMESSAGE_TO</key>
+    <string>__YOUR_IMESSAGE_HANDLE__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/mccoy/bugnav/data/notify-bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/mccoy/bugnav/data/notify-bridge.log</string>
+</dict>
+</plist>
