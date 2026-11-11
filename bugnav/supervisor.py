@@ -37,7 +37,7 @@ import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
 
-from .chargeplan import ChargeModel
+from .chargeplan import MARGIN, ChargeModel
 from .model import RobotState, Sample
 
 CELL_M = 0.5
@@ -423,6 +423,23 @@ class SessionWatch:
         used = len(self._water_cells) * CELL_AREA_M2 * rate
         return round(max(0.0, 100.0 - used), 1)
 
+    def _best_drain(self, model: ChargeModel | None) -> float:
+        """Drain estimate by evidence strength: rolling > bout > model."""
+        return (self.rolling_drain_pct_per_m2()
+                or self.drain_pct_per_m2()
+                or (model.drain_pct_per_m2 if model is not None
+                    else ChargeModel().drain_pct_per_m2))
+
+    def soc_to_guarantee_finish(self, remaining_m2: float,
+                                model: ChargeModel | None = None) -> int:
+        """SOC to LEAVE the dock with so the remaining area finishes in
+        one outing: reserve + remaining x drain x safety margin.  This
+        is an honest number for the judge, not a hard rule - the LLM
+        weighs it against the clock, the hour and what is left."""
+        need = (self.cfg.eta_reserve_pct
+                + remaining_m2 * self._best_drain(model) * MARGIN)
+        return int(math.ceil(min(100.0, need)))
+
     def estimate_eta(self, wall: float, home_cells: int,
                      model: ChargeModel | None = None) -> dict | None:
         """Projected finish: remaining area at the live progress rate,
@@ -443,9 +460,7 @@ class SessionWatch:
         if not progress:
             return None
         model = model or ChargeModel()
-        drain = (self.rolling_drain_pct_per_m2()
-                 or self.drain_pct_per_m2()
-                 or model.drain_pct_per_m2)
+        drain = self._best_drain(model)
         clean_min = remaining / progress
         charges = 0
         charge_min = 0.0
@@ -534,6 +549,8 @@ class SessionWatch:
             d["remaining_est_m2"] = round(remaining, 1)
             d["coverage_pct_of_home"] = round(
                 100.0 * len(self.cells) / home_cells, 1)
+            d["resume_soc_to_guarantee_finish"] = (
+                self.soc_to_guarantee_finish(remaining, charge_model))
             eta = self.estimate_eta(wall, home_cells, charge_model)
             if eta is not None:
                 d.update(eta)
@@ -558,6 +575,9 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 - 地图缓存对不上（摘要带 home_based_figures_withheld 时）：本场扫的区域与缓存的全屋面积显著不同——多半是换了地图、换了清扫房间，或把机器人带去了别处。此时摘要已扣下剩余面积/覆盖率/预计完成时间，不要拿它们做判断，按已扫时长、推进速度、重扫率照常判断即可；这件事本身值得 notify 用户一句。缓存基准会在新布局连续出现两场后自动重建，不用管。
 - 充电裁决（机器人回站充电中、摘要带 deterministic_charge_plan 时）：这就是「要不要再放它出去续扫」的决策点，每一次都要重新判断，不默认放行。先过合理性这一关（见下面单场时长与作息），不合理就 stop_session；合理时默认认可规划器的 resume_soc，只有明确理由（如剩余面积小到不值得再充）才用 resume_charge_pct 覆盖。若剩余面积为 0 或极小，优先 stop_session 而不是再充再扫。
 - 短周期反复充电（摘要 short_cycle_thrashing=true 时）：充完回来扫没多久又没电、已经反复多轮——这说明续扫电量或耗电估计根本没处理好。系统已自动把本轮续扫电量下限抬到 95%，不要再按原规划放行。结合 charge_segments 诊断：每轮出发电量（start_batt）不高，是充得太少；出发电量已高却很快耗尽（end_batt 很快见底），是耗电异常，值得 notify 用户。若已反复多轮、剩余又不多，直接 stop_session 收尾。
+- 剩余不多、却必须充电时（如还剩约 10% 面积、电量实在撑不到扫完）：这一轮充电的目标不是省时间，而是「充够一次扫完」。摘要的 resume_soc_to_guarantee_finish 是按当前耗电估算加安全系数算出的、足够一次扫完剩余的出发电量：裁决 resume_charge_pct 时不要低于它，没充到这个数之前不要放行续扫——为省几分钟充电去赌一把、不够再回一趟，是最亏的走法。反之剩余很多时不必死守这个数，按总耗时最优权衡。
+- 时段锚点：上午发起的任务，拖到下午四五点还在续扫，本身就是强收尾信号——除非剩余极少且一次能扫完，否则 stop_session，不要让它跨过晚间居家时段继续耗。
+以上是判断逻辑，不是死规则：结合摘要全貌（进度、速度、电量、时刻、已投入时长）综合裁量，拿不准时倾向于「少折腾」：要么一次充够扫完，要么干脆收尾。
 - 单场时长与作息常识（每次裁决都要合并判断，不要孤立看任何单个数字）：
   · 一次清扫任务的合理跨度：普通户型 1–2 小时，大户型 3–4 小时已是上限；拖到半天（约 6 小时以上）本身即不合理——除非摘要能证明面积确实巨大且推进速度正常，否则 stop_session，剩余留到下一次任务，不要为「扫完」无限续扫。一整天更不用说。摘要若带 home_note 与 normal_session_max_min，那是本户的实际清扫范围与正常时长，以它为准、通用标尺让位：本户正常上限已到、而覆盖又已完成大半，就按异常收尾处理。
   · 结合当前时刻与普通人作息：深夜至清晨（约 23:00–07:00）一般不应持续作业、更不应再放它出去续扫，除非任务开始时间表明这就是用户有意安排的时段；晚间居家时段长时间轰鸣也有打扰成本，已扫很久时倾向收尾。

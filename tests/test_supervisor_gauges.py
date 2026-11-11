@@ -237,6 +237,36 @@ class TestChargeThrash(unittest.TestCase):
         self.assertIn("short_cycle_thrashing", SYSTEM)
 
 
+class TestGuaranteeSoc(unittest.TestCase):
+    def test_guarantee_figure_in_digest(self):
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        _sweep(w, 40, 0.0, 100, 90)  # drain ~1.0 %/m^2, 10 m^2 covered
+        d = w.digest(1_700_000_000.0 + 1000.0, "monitor",
+                     home_cells=80)  # remaining 10 m^2
+        # reserve 8 + 10 m^2 x ~1.0 %/m^2 x margin 1.25 = ~20.5 -> 21
+        self.assertGreaterEqual(d["resume_soc_to_guarantee_finish"], 19)
+        self.assertLessEqual(d["resume_soc_to_guarantee_finish"], 23)
+
+    def test_guarantee_scales_with_remaining(self):
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        _sweep(w, 40, 0.0, 100, 90)
+        small = w.soc_to_guarantee_finish(10.0)
+        big = w.soc_to_guarantee_finish(60.0)
+        self.assertLess(small, big)
+        self.assertLessEqual(big, 100)
+
+    def test_prompt_carries_guarantee_and_afternoon_anchor(self):
+        # User (2026-11-11): with ~10% left and a charge unavoidable,
+        # charge enough to GUARANTEE finishing, and do not resume
+        # before that; a morning task still resuming at 16-17:00 is a
+        # stop signal.  These are judgment logic for the LLM, fed with
+        # computed figures - not hardcoded rules.
+        self.assertIn("resume_soc_to_guarantee_finish", SYSTEM)
+        self.assertIn("保证", SYSTEM)
+        self.assertIn("四五点", SYSTEM)
+        self.assertIn("不是死规则", SYSTEM)
+
+
 class TestHomeCacheConsistency(unittest.TestCase):
     """User (2026-11-11): robot taken to another home / new map /
     different rooms -> cached denominators must not be reported as
