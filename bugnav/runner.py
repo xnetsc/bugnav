@@ -19,6 +19,7 @@ import os
 import sys
 import time
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 from . import llm as llm_mod
 from . import strategist, supervisor as sup_mod
@@ -31,6 +32,24 @@ from .model import Command, CommandKind, RobotState
 def _load_json(path: str) -> dict:
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def log_stamp(device_epoch: float | None,
+              tz_offset_hours: float) -> str | None:
+    """HH:MM:SS for a log line, rendered from the COMPUTED time -
+    the robot's clock in the robot's zone - or None when no device
+    clock basis has been captured yet (the caller then falls back
+    to the process clock for the first startup lines only).
+
+    Log timestamps must come from the same computed time everything
+    else uses, never from the process-local clock: a container
+    without TZ configured printed UTC stamps next to verdicts that
+    (correctly) reasoned in local time (user 2026-11-11: 改为计算
+    后的时间做时间戳打印)."""
+    if device_epoch is None:
+        return None
+    tz = timezone(timedelta(hours=tz_offset_hours))
+    return datetime.fromtimestamp(device_epoch, tz).strftime("%H:%M:%S")
 
 
 async def _main_async(cfg_path: str, mode: str) -> None:
@@ -60,10 +79,16 @@ async def _main_async(cfg_path: str, mode: str) -> None:
     log_path = os.path.join(data_dir, "events.jsonl")
 
     def log(msg: str) -> None:
-        line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+        dn = adapter.device_now()
+        stamp = log_stamp(dn, sup_cfg.tz_offset_hours)
+        if stamp is None:  # no device header captured yet (startup)
+            stamp, epoch = time.strftime("%H:%M:%S"), time.time()
+        else:
+            epoch = dn
+        line = f"[{stamp}] {msg}"
         print(line, flush=True)
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": time.time(), "msg": msg}) + "\n")
+            f.write(json.dumps({"ts": epoch, "msg": msg}) + "\n")
         if webhook and msg.startswith("NOTIFY"):
             try:
                 req = urllib.request.Request(
