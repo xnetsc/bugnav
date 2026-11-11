@@ -24,6 +24,14 @@ class TestReasonablenessFrame(unittest.TestCase):
         self.assertIn("半天", SYSTEM)
         self.assertIn("作息", SYSTEM)
 
+    def test_prompt_carries_no_full_coverage_obligation(self):
+        # User (2026-11-11): after 4-5 h with most of the planned area
+        # done, end it - no obligation to leave nothing uncleaned.
+        # This judgment belongs to the LLM, fed with enough info.
+        self.assertIn("不遗漏", SYSTEM)
+        self.assertIn("性价比", SYSTEM)
+        self.assertIn("coverage_pct_of_home", SYSTEM)
+
 
 def _sweep(w: SessionWatch, n: int, t0: float, batt0: float,
            batt1: float, water_amount: int | None = 2,
@@ -65,6 +73,7 @@ class TestEta(unittest.TestCase):
         _sweep(w, 40, 0.0, 100, 90)
         d = w.digest(1_700_000_000.0 + 1000.0, "monitor",
                      home_cells=40 + 40)  # 10 m^2 remaining
+        self.assertEqual(d["coverage_pct_of_home"], 50.0)
         self.assertEqual(d["eta_charges_left"], 0)
         self.assertGreater(d["eta_minutes_left"], 5)
         self.assertLess(d["eta_minutes_left"], 40)

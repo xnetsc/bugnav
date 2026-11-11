@@ -374,6 +374,8 @@ class SessionWatch:
             remaining = max(0, home_cells - len(self.cells)) * CELL_AREA_M2
             d["home_area_est_m2"] = round(home_cells * CELL_AREA_M2, 1)
             d["remaining_est_m2"] = round(remaining, 1)
+            d["coverage_pct_of_home"] = round(
+                100.0 * len(self.cells) / home_cells, 1)
             eta = self.estimate_eta(wall, home_cells, charge_model)
             if eta is not None:
                 d.update(eta)
@@ -399,6 +401,7 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
   · 一次清扫任务的合理跨度：普通户型 1–2 小时，大户型 3–4 小时已是上限；拖到半天（约 6 小时以上）本身即不合理——除非摘要能证明面积确实巨大且推进速度正常，否则 stop_session，剩余留到下一次任务，不要为「扫完」无限续扫。一整天更不用说。
   · 结合当前时刻与普通人作息：深夜至清晨（约 23:00–07:00）一般不应持续作业、更不应再放它出去续扫，除非任务开始时间表明这就是用户有意安排的时段；晚间居家时段长时间轰鸣也有打扰成本，已扫很久时倾向收尾。
   · 合并看三件事：已扫总时长（bout_elapsed_min）、预计还要多久（eta_minutes_left / eta_finish）、当前时刻（now）。已扫很久 + 还要很久 + 时段不对，任意两条叠加就应认真考虑 stop_session 并在 message 里说明。
+- 不必全覆盖（收尾宽容）：清扫没有「不遗漏任何区域」的义务，100% 覆盖不是目标，总耗时最短才是。已经扫了很久（如四五个小时）且计划区域的多数已经扫完（coverage_pct_of_home 约 85% 以上）时，剩下的零头不值得再花时间、更不值得再充一轮电去追——直接 stop_session 收尾就是合理选择，在 message 里说明已完成大部分、剩余留待下次即可。一般地，每次都要算剩余的「性价比」：剩余面积 vs 预计耗时（eta）vs 已投入时长；已投入越久，为零头继续的门槛应越高，已花的时长是沉没成本，不构成继续扫的理由。
 判断要克制：数据不足以证明异常时选 continue，不要因为单纯耗时长就停大户型的正常清扫。"""
 
 
