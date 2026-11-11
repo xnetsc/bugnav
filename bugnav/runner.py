@@ -261,7 +261,7 @@ async def _main_async(cfg_path: str, mode: str) -> None:
             if blocked_cells:
                 blocked_m2 = blocked_cells * sup_mod.CELL_AREA_M2
         digest = watch.digest(
-            time.time(), controller.phase.value,
+            _wall(), controller.phase.value,
             home_cells=len(home_cells) or None,
             robot_state=sample.state.value, charge_plan=plan,
             charge_model=charge_model, home_set=home_cells,
@@ -347,6 +347,17 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                     f"(plan={plan}, verdict_override={verdict.resume_charge_pct})")
 
     await adapter.connect(log)
+
+    def _wall() -> float:
+        """Wall clock for everything the AI (or the user, via a
+        notification) reads as 'now': the ROBOT's own time - its
+        response-header timestamp projected on the monotonic clock.
+        The host's wall clock is never the basis (user 2026-11-11:
+        AI 的时钟以扫地机自己上报的时间为准，不可以写死).  Falls
+        back to the host clock only until the first header lands."""
+        dn = adapter.device_now()
+        return dn if dn is not None else time.time()
+
     if sup_mod.adopt_device_tz(
             sup_cfg,
             config_had_key="tz_offset_hours" in raw.get("supervisor", {}),
@@ -365,7 +376,7 @@ async def _main_async(cfg_path: str, mode: str) -> None:
             sample = adapter.sample(now)
             if sample is not None:
                 state["last_sample"] = sample
-                wall = time.time()
+                wall = _wall()
                 with open(
                     os.path.join(data_dir, "samples.jsonl"), "a", encoding="utf-8"
                 ) as f:

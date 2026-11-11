@@ -74,6 +74,32 @@ class AdapterConfig:
 _STATE_MAP = {}
 
 
+def parse_device_clock(header, mono_now: float):
+    """(device_epoch_s, mono_now, tz_offset_hours|None) from a
+    response header, or None when the header carries no usable
+    device timestamp.
+
+    The firmware stamps every response with its own 'ts' (device
+    epoch milliseconds, as a string) and 'tzm' (UTC offset minutes).
+    The robot is the authority for both - the only sanity bounds
+    reject absurd epochs (a device that has not time-synced yet);
+    the value is NEVER clamped against the host clock, because the
+    host clock is exactly what is not trusted."""
+    if not header:
+        return None
+    try:
+        epoch_s = float(header.get("ts")) / 1000.0
+    except (TypeError, ValueError):
+        return None
+    if not (1_577_836_800 <= epoch_s <= 4_102_444_800):  # 2020..2100
+        return None
+    tz_hours = None
+    tzm = header.get("tzm")
+    if isinstance(tzm, (int, float)) and -720 <= tzm <= 840:
+        tz_hours = tzm / 60.0
+    return (epoch_s, mono_now, tz_hours)
+
+
 class DeebotAdapter:
     def __init__(self, cfg: AdapterConfig):
         self.cfg = cfg
@@ -86,6 +112,12 @@ class DeebotAdapter:
         # Robot-reported UTC offset in hours (response header 'tzm'),
         # captured at connect; None when the capture failed.
         self.device_tz_offset_hours: float | None = None
+        # Robot clock basis: (device epoch s, monotonic s at capture).
+        # device_now() projects it forward on the monotonic clock, so
+        # the AI's sense of 'now' is the ROBOT's time, immune to host
+        # wall-clock skew and jumps (user 2026-11-11: AI 的时钟以
+        # 扫地机自己上报的时间和时区为准，不可以写死).
+        self._device_clock: tuple[float, float] | None = None
         self.water_amount: int | None = None  # latest WaterInfoEvent amount 1..4
         self.mop_attached: bool | None = None
 
@@ -246,23 +278,22 @@ class DeebotAdapter:
         await self._device.initialize(mqtt)
         log(f"connected to device: {info.api.get('deviceName')} class={info.api.get('class')}")
 
-        # The robot carries its own configured timezone and reports
-        # it in every response header ('tzm', minutes).  Verified NOT
-        # an echo of the request header: a probe declaring tzm=0 was
-        # still answered 480 (2026-11-11).  Capture it so downstream
-        # clocks follow the household's zone as the robot knows it,
-        # not a constant somebody typed into a config file.
+        # The robot carries its own clock and timezone and stamps
+        # every response header with them ('ts' = device epoch ms,
+        # 'tzm' = offset minutes).  Verified NOT an echo of the
+        # request header: a probe declaring tzm=0 was still answered
+        # 480 (2026-11-11).  Capture both as the time basis for
+        # everything downstream.
         try:
             from deebot_client.commands.json.battery import GetBattery
 
             raw_resp = await self._device.execute_command(GetBattery())
-            tzm = ((raw_resp or {}).get("resp", {}).get("header", {})
-                   or {}).get("tzm")
-            if isinstance(tzm, (int, float)) and -720 <= tzm <= 840:
-                self.device_tz_offset_hours = tzm / 60.0
-                log(f"robot reports timezone UTC"
-                    f"{self.device_tz_offset_hours:+g} (tzm={tzm} min)")
-        except Exception:  # noqa: BLE001 - best effort; config fallback
+            self._note_device_clock(raw_resp)
+            if self._device_clock is not None:
+                log(f"robot clock captured: epoch "
+                    f"{self._device_clock[0]:.0f}, timezone UTC"
+                    f"{self.device_tz_offset_hours:+g}")
+        except Exception:  # noqa: BLE001 - best effort; fallbacks exist
             pass
 
         async def on_pos(event) -> None:
@@ -299,6 +330,28 @@ class DeebotAdapter:
         self._BatteryEvent = BatteryEvent
         self._WaterInfoEvent = WaterInfoEvent
 
+    def _note_device_clock(self, raw) -> None:
+        """Adopt the robot's clock basis from a command response."""
+        header = ((raw or {}).get("resp", {}) or {}).get("header")
+        parsed = parse_device_clock(header, time.monotonic())
+        if parsed is None:
+            return
+        epoch_s, mono_now, tz_hours = parsed
+        self._device_clock = (epoch_s, mono_now)
+        if tz_hours is not None:
+            self.device_tz_offset_hours = tz_hours
+
+    def device_now(self) -> float | None:
+        """Current time on the ROBOT's clock (epoch s), or None if
+        no response header has been captured yet.  Projects the
+        captured basis forward on the monotonic clock, so it tracks
+        the device even between responses and never inherits host
+        wall-clock jumps."""
+        if self._device_clock is None:
+            return None
+        epoch0, mono0 = self._device_clock
+        return epoch0 + (time.monotonic() - mono0)
+
     def request_refresh(self) -> None:
         if self._device is not None:
             self._device.events.request_refresh(self._PositionsEvent)
@@ -330,27 +383,30 @@ class DeebotAdapter:
         from deebot_client.models import CleanAction, CleanMode
 
         assert self._device is not None
+
+        async def _exec(command) -> None:
+            raw = await self._device.execute_command(command)
+            self._note_device_clock(raw)
+
         # V2 firmwares (like the T80S) reject the V1 "clean" command the
         # same way they reject getCleanInfo - then EVERY action, pause
         # and resume included, must go through clean_V2.
         clean_cls = CleanV2 if self.cfg.clean_command_v2 else Clean
         if cmd.kind == CommandKind.PAUSE:
-            await self._device.execute_command(clean_cls(CleanAction.PAUSE))
+            await _exec(clean_cls(CleanAction.PAUSE))
         elif cmd.kind == CommandKind.STOP:
-            await self._device.execute_command(clean_cls(CleanAction.STOP))
+            await _exec(clean_cls(CleanAction.STOP))
         elif cmd.kind == CommandKind.RESUME_AUTO:
-            await self._device.execute_command(clean_cls(CleanAction.START))
+            await _exec(clean_cls(CleanAction.START))
         elif cmd.kind == CommandKind.RETURN_TO_DOCK:
             from deebot_client.commands.json import Charge
 
-            await self._device.execute_command(Charge())
+            await _exec(Charge())
             log("sent return-to-dock (charge)")
         elif cmd.kind == CommandKind.CLEAN_AREA and cmd.point is not None:
             rect = self.to_raw_rect(cmd.point, cmd.rect_half_m)
             cls = CleanAreaV2 if self.cfg.clean_command_v2 else CleanArea
-            await self._device.execute_command(
-                cls(CleanMode.CUSTOM_AREA, rect, 1)
-            )
+            await _exec(cls(CleanMode.CUSTOM_AREA, rect, 1))
             log(f"sent CUSTOM_AREA rect={rect}")
         elif cmd.kind == CommandKind.PLAY_SOUND:
             from deebot_client.commands.json import PlaySound
@@ -361,7 +417,7 @@ class DeebotAdapter:
             # with pauses so it registers as an alarm, not a blip.
             n = max(1, cmd.count)
             for i in range(n):
-                await self._device.execute_command(PlaySound())
+                await _exec(PlaySound())
                 if i + 1 < n:
                     await asyncio.sleep(1.5)
             log(f"played robot alert sound x{n}")
