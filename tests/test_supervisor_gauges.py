@@ -397,6 +397,16 @@ class TestComplexityAccounting(unittest.TestCase):
         self.assertEqual(d["low_yield_share_recent"], 0.0)
         self.assertGreater(d["advancing_pace_m2_per_min"], 0)
 
+    def test_total_span_outranks_ratio_and_must_speak_up(self):
+        # User (2026-11-11): whatever the (complexity-adjusted)
+        # speed, the TOTAL span must not stretch to unacceptable;
+        # and if complexity truly makes it unfinishable, the user
+        # must be TOLD, not left watching it grind on silently.
+        self.assertNotIn("只要比率相称就不要停", SYSTEM)
+        self.assertIn("解释不了无限长", SYSTEM)
+        self.assertIn("扫不完", SYSTEM)
+        self.assertIn("必须用 notify", SYSTEM)
+
     def test_no_hardcoded_thrash_floor(self):
         # User (2026-11-11): conclusions belong to the AI, not code -
         # the forced 95% resume floor is gone; thrash stays a
