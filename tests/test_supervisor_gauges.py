@@ -340,6 +340,44 @@ class TestExpectedDuration(unittest.TestCase):
         self.assertGreater(d["projected_vs_expected_ratio"], 1.0)
 
 
+class TestComplexityAccounting(unittest.TestCase):
+    """User (2026-11-11): in a cluttered environment, judge against
+    what remains AFTER excluding obstacle-blocked area, and against
+    the pace this environment actually demonstrates."""
+
+    def test_blocked_area_rebases_expectations(self):
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        _sweep(w, 40, 0.0, 100, 90)  # covered 10 m^2 of planned 20
+        plain = w.digest(1_700_000_000.0 + 1000.0, "monitor",
+                         home_cells=80)
+        blocked = w.digest(1_700_000_000.0 + 1000.0, "monitor",
+                           home_cells=80, blocked_m2=5.0)
+        self.assertEqual(blocked["blocked_area_est_m2"], 5.0)
+        self.assertEqual(blocked["cleanable_area_est_m2"], 15.0)
+        self.assertEqual(blocked["effective_remaining_m2"], 5.0)
+        self.assertAlmostEqual(
+            blocked["coverage_pct_of_cleanable"], 66.7, delta=0.2)
+        self.assertLess(blocked["expected_total_min_for_planned_area"],
+                        plain["expected_total_min_for_planned_area"])
+
+    def test_conservative_expectation_at_demonstrated_pace(self):
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        _sweep(w, 40, 0.0, 100, 90)  # pace ~0.62 m^2/min < nominal 1.1
+        d = w.digest(1_700_000_000.0 + 1000.0, "monitor",
+                     home_cells=80)
+        self.assertIn("expected_total_min_conservative", d)
+        self.assertGreater(d["expected_total_min_conservative"],
+                           d["expected_total_min_for_planned_area"])
+        self.assertIn("projected_vs_conservative_ratio", d)
+        self.assertLess(d["projected_vs_conservative_ratio"],
+                        d["projected_vs_expected_ratio"])
+
+    def test_prompt_carries_complexity_logic(self):
+        self.assertIn("coverage_pct_of_cleanable", SYSTEM)
+        self.assertIn("保守预期", SYSTEM)
+        self.assertIn("复杂度", SYSTEM)
+
+
 class TestHomeCacheConsistency(unittest.TestCase):
     """User (2026-11-11): robot taken to another home / new map /
     different rooms -> cached denominators must not be reported as

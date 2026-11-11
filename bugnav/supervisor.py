@@ -523,7 +523,8 @@ class SessionWatch:
                robot_state: str = "",
                charge_plan: dict | None = None,
                charge_model: ChargeModel | None = None,
-               home_set: set | None = None) -> dict:
+               home_set: set | None = None,
+               blocked_m2: float | None = None) -> dict:
         revisit = 0.0
         if self.cell_entries:
             revisit = round(1.0 - len(self.cells) / self.cell_entries, 2)
@@ -589,16 +590,53 @@ class SessionWatch:
             if options:
                 d["charge_options"] = options
             planned_m2 = home_cells * CELL_AREA_M2
-            expected = expected_total_minutes(
-                planned_m2, charge_model or ChargeModel())
+            # Complexity accounting (user 2026-11-11): part of the
+            # nominal area is obstacle footprint the robot can never
+            # clean.  Expectations and coverage are judged against the
+            # CLEANABLE area, not the nominal one.
+            cleanable_m2 = planned_m2
+            if blocked_m2:
+                blocked = min(blocked_m2, 0.4 * planned_m2)
+                cleanable_m2 = planned_m2 - blocked
+                d["blocked_area_est_m2"] = round(blocked, 1)
+                d["cleanable_area_est_m2"] = round(cleanable_m2, 1)
+                d["effective_remaining_m2"] = round(
+                    max(0.0, remaining - blocked), 1)
+                if cleanable_m2 > 0:
+                    d["coverage_pct_of_cleanable"] = round(
+                        100.0 * self.covered_m2() / cleanable_m2, 1)
+            model = charge_model or ChargeModel()
+            expected = expected_total_minutes(cleanable_m2, model)
             if expected > 0:
                 d["expected_total_min_for_planned_area"] = expected
-            eta = self.estimate_eta(wall, home_cells, charge_model)
+            # Conservative expectation: same cleanable area at the
+            # pace THIS environment has actually demonstrated - the
+            # rolling pace already prices in every obstacle encounter,
+            # detour and retry, so it is the honest speed yardstick in
+            # a cluttered home (user 2026-11-11).
+            expected_cons = None
+            pace = self.rolling_progress_m2_per_min()
+            if pace is None and self.bout_cleaning_s >= 600:
+                pace = self.covered_m2() / (self.bout_cleaning_s / 60.0)
+            if pace is not None and 0.25 <= pace < 1.1:
+                expected_cons = expected_total_minutes(
+                    cleanable_m2, model, speed_m2_per_min=pace)
+                d["expected_total_min_conservative"] = expected_cons
+                d["demonstrated_pace_m2_per_min"] = round(pace, 2)
+            # ETA also targets the cleanable area: projecting a finish
+            # time for square metres no robot can ever reach would
+            # poison every ratio built on it.
+            eta_cells = (home_cells if cleanable_m2 == planned_m2
+                         else int(round(cleanable_m2 / CELL_AREA_M2)))
+            eta = self.estimate_eta(wall, eta_cells, charge_model)
             if eta is not None:
                 d.update(eta)
                 if expected > 0:
                     d["projected_vs_expected_ratio"] = round(
                         eta["projected_total_span_min"] / expected, 2)
+                if expected_cons:
+                    d["projected_vs_conservative_ratio"] = round(
+                        eta["projected_total_span_min"] / expected_cons, 2)
         if charge_plan is not None:
             d["deterministic_charge_plan"] = charge_plan
         return d
@@ -626,9 +664,10 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 以上是判断逻辑，不是死规则：结合摘要全貌（进度、速度、电量、时刻、已投入时长）综合裁量，拿不准时倾向于「少折腾」：要么一次充够扫完，要么干脆收尾。
 - 单场时长与作息常识（每次裁决都要合并判断，不要孤立看任何单个数字）：
   · 合理时长不看绝对钟点、看与计划面积是否相称：摘要的 expected_total_min_for_planned_area 是按合理清扫速度扫完计划面积本应花的总时间（含必要充电），projected_vs_expected_ratio 是「已花+预计总跨度」与它的比值。比值在约 1.3 以内，就是与面积相称的正常清扫——哪怕绝对时长很长也不要停；比值明显偏大（如 2 倍上下），说明效率出了问题（重扫、推进塌陷、充电策略不当），那才是不合理，应考虑 stop_session、剩余留到下一次，不要为「扫完」无限续扫。不要用写死的「几小时」一刀切。home_note 与 normal_session_max_min 是用户按自家情况给的经验参考：范围信息（扫哪些房间）照用，时长与面积推导冲突时以面积推导为准。
+  · 环境复杂度要计价：障碍多的环境推进慢是正常代价，且名义面积里有一块是障碍占住、永远扫不到的。摘要若带 blocked_area_est_m2 / cleanable_area_est_m2，预期时长已按可扫面积算；另有保守预期（expected_total_min_conservative、projected_vs_conservative_ratio）是按本环境已证明的速度算的——先看保守比率：落在乐观与保守之间属于复杂环境的正常成本，不算异常；连保守预期都明显超出，才是真问题。
   · 结合当前时刻与普通人作息：深夜至清晨（约 23:00–07:00）一般不应持续作业、更不应再放它出去续扫，除非任务开始时间表明这就是用户有意安排的时段；晚间居家时段长时间轰鸣也有打扰成本，已扫很久时倾向收尾。
   · 合并看三件事：已扫时长相对面积预期是否失衡（projected_vs_expected_ratio）、预计还要多久（eta_minutes_left / eta_finish）、当前时刻（now）。比率失衡 + 还要很久 + 时段不对，任意两条叠加就应认真考虑 stop_session 并在 message 里说明。
-- 不必全覆盖（收尾宽容）：清扫没有「不遗漏任何区域」的义务，100% 覆盖不是目标，总耗时最短才是。已经扫了很久（如四五个小时）且计划区域的多数已经扫完（coverage_pct_of_home 约 85% 以上）时，剩下的零头不值得再花时间、更不值得再充一轮电去追——直接 stop_session 收尾就是合理选择，在 message 里说明已完成大部分、剩余留待下次即可。一般地，每次都要算剩余的「性价比」：剩余面积 vs 预计耗时（eta）vs 已投入时长；已投入越久，为零头继续的门槛应越高，已花的时长是沉没成本，不构成继续扫的理由。
+- 不必全覆盖（收尾宽容）：清扫没有「不遗漏任何区域」的义务，100% 覆盖不是目标，总耗时最短才是。覆盖率要对着可扫面积看（coverage_pct_of_cleanable）：障碍占住、进不去的区域不计入「剩下多少」；可扫部分已基本扫完，就不要为名义覆盖率不满而继续耗。已经扫了很久（如四五个小时）且计划区域的多数已经扫完（coverage_pct_of_home 约 85% 以上）时，剩下的零头不值得再花时间、更不值得再充一轮电去追——直接 stop_session 收尾就是合理选择，在 message 里说明已完成大部分、剩余留待下次即可。一般地，每次都要算剩余的「性价比」：剩余面积 vs 预计耗时（eta）vs 已投入时长；已投入越久，为零头继续的门槛应越高，已花的时长是沉没成本，不构成继续扫的理由。
 判断要克制：数据不足以证明异常时选 continue，不要因为单纯耗时长就停大户型的正常清扫。"""
 
 

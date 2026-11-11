@@ -213,11 +213,28 @@ async def _main_async(cfg_path: str, mode: str) -> None:
             if drain:
                 charge_model.drain_pct_per_m2 = drain
             plan = plan_resume(adapter.battery_pct, remaining, charge_model)
+        # Blocked-area estimate: baseline cells lying inside a known
+        # obstacle cluster's footprint (+ margin) are area the robot
+        # can never clean; expectations must not charge time for them.
+        blocked_m2 = None
+        clusters = controller.clusters.clusters
+        if home_cells and clusters:
+            blocked_cells = 0
+            for cell in home_cells:
+                cx, cy = cell[0] * sup_mod.CELL_M, cell[1] * sup_mod.CELL_M
+                for cl in clusters:
+                    dx, dy = cx - cl.centre.x, cy - cl.centre.y
+                    if dx * dx + dy * dy <= (cl.radius_m + 0.25) ** 2:
+                        blocked_cells += 1
+                        break
+            if blocked_cells:
+                blocked_m2 = blocked_cells * sup_mod.CELL_AREA_M2
         digest = watch.digest(
             time.time(), controller.phase.value,
             home_cells=len(home_cells) or None,
             robot_state=sample.state.value, charge_plan=plan,
-            charge_model=charge_model, home_set=home_cells)
+            charge_model=charge_model, home_set=home_cells,
+            blocked_m2=blocked_m2)
         verdict = sup_mod.Verdict()
         try:
             text = await llm_mod.chat(sup_mod.build_messages(digest))
