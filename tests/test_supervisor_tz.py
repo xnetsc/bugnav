@@ -58,3 +58,38 @@ class TestSupervisorClock(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPrecomputedTimes(unittest.TestCase):
+    """The judge receives READY-MADE time differences, never raw
+    clock pairs it would have to subtract itself (user 2026-11-11:
+    给 AI 时要给算好的时间，不要让 AI 算时间)."""
+
+    def test_span_over_normal_is_precomputed(self):
+        from bugnav.model import Point, RobotState, Sample
+
+        w = SessionWatch(SupervisorConfig(
+            enabled=True, normal_session_max_s=3600.0))
+        t = 0.0
+        for i in range(40):
+            t += 25.0
+            w.feed(Sample(t=t, pos=Point(i * 0.5, 0.0),
+                          state=RobotState.CLEANING),
+                   "monitor", wall=1_700_000_000.0 + t,
+                   battery=100 - i // 4, water_amount=2)
+        d = w.digest(1_700_000_000.0 + t + 25.0, "monitor",
+                     home_cells=200)
+        self.assertIn("projected_total_span_min", d)
+        self.assertIn("span_over_normal_min", d)
+        self.assertAlmostEqual(
+            d["span_over_normal_min"],
+            round(d["projected_total_span_min"]
+                  - d["normal_session_max_min"], 1),
+            places=1)
+
+    def test_prompt_forbids_clock_arithmetic(self):
+        from bugnav.supervisor import SYSTEM
+
+        self.assertIn("时间纪律", SYSTEM)
+        self.assertIn("严禁用钟点做加减", SYSTEM)
+        self.assertIn("span_over_normal_min", SYSTEM)
