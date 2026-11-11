@@ -45,6 +45,19 @@ operations → verification checklist → rollback), in Chinese:
   direction — charging the same direction ten times is one attempt.
   Small obstacle fully circled with a gap found = success; large
   obstacle fully circled with no gap = give up for this session.
+- **The way out is explored too**: backtracking along the breadcrumbs
+  is only the baseline route — it is never assumed to still be clear.
+  If a new obstacle blocks it en route (struggle, or a waypoint
+  timing out with no progress), the robot switches into the same
+  wall-following detour, with the objective of **leaving the area**:
+  it aims at the area exit at the far end of the trail, and
+  rejoining the corridor at *any* remaining breadcrumb counts as
+  success — it does not have to regain the exact previous waypoint.
+  Only when that exploration has circled completely and can neither
+  regain the exit nor leave the area at all is the robot declared
+  **trapped**: it stops and raises an alarm for a human rescue, and
+  stays hands-off until a person visibly intervenes (robot moved by
+  hand, or back at the dock).
 - **Looping/loitering detection**: circling inside a small disc
   (long path, large cumulative turn, small net displacement) triggers
   takeover into wall-following on first occurrence, before it turns

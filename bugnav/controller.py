@@ -88,6 +88,10 @@ class ControllerConfig:
     goal_timeout_s: float = 35.0
     retreat_timeout_s: float = 45.0
     backtrack_timeout_s: float = 30.0
+    # A backtrack waypoint that times out with less than this much
+    # progress toward it counts as BLOCKED (something moved into the
+    # entry corridor), not as "close enough, move on".
+    backtrack_min_progress_m: float = 0.12
     # Full circle on an obstacle this small = success (its perimeter is
     # then fully cleaned). Contact points sit one robot-clearance away
     # from the physical object, so a chair leg's cluster measures up to
@@ -145,6 +149,13 @@ class BugNavController:
         self._pending_target: Point | None = None
         self._deadline = 0.0
         self._backtrack_points: list[Point] = []
+        self._bt_start_dist: float | None = None
+        # While a backtrack detour runs, the area-exit point it aims
+        # at; also serves as the "in detour" flag.
+        self._detour_goal: Point | None = None
+        # Boxed-in latch: set when trapped is declared; MONITOR stays
+        # hands-off until a human visibly intervenes.
+        self._trapped_pos: Point | None = None
         self._blacklist: list[tuple[Point, float]] = []  # (centre, expiry t)
         self._cooldown_until = 0.0
         self._error_pause_sent = False
@@ -206,6 +217,15 @@ class BugNavController:
             self._free_heading = angle_of(pts[-1] - pts[0])
 
     def _tick_monitor(self, sample: Sample) -> list[Command]:
+        if self._trapped_pos is not None:
+            # Boxed in and alarmed: start nothing, resume nothing,
+            # until a human visibly intervenes (robot moved by hand
+            # or back at the dock).
+            if (sample.state == RobotState.DOCKED
+                    or sample.pos.distance_to(self._trapped_pos) > 1.0):
+                self._trapped_pos = None
+            else:
+                return []
         self.trail.record(sample)
         self._track_free_heading(sample)
         event = self.detector.feed(sample)
@@ -287,6 +307,7 @@ class BugNavController:
         goal: Point | None = None,
         tried_sectors: set[int] | None = None,
         notify_text: str | None = None,
+        skip_blacklist_check: bool = False,
     ) -> list[Command]:
         if cluster is None:
             cluster = self.clusters.find_or_create(hit)  # type: ignore[arg-type]
@@ -299,7 +320,7 @@ class BugNavController:
         st.episodes += 1
         self._save_stats()
 
-        if self._is_blacklisted(cluster.centre, sample.t):
+        if not skip_blacklist_check and self._is_blacklisted(cluster.centre, sample.t):
             cmds.append(
                 Command(
                     CommandKind.NOTIFY,
@@ -385,6 +406,14 @@ class BugNavController:
                     self._attempt_failed(sample, "staging unreachable", physical=False)
                 )
         elif self.phase == Phase.TO_GOAL:
+            if self._detour_goal is not None:
+                # Detour success = back on the entry corridor at ANY
+                # remaining breadcrumb (leaving the area is the
+                # objective, not regaining one exact waypoint).
+                for p in self._backtrack_points:
+                    if sample.pos.distance_to(p) <= self.cfg.arrival_tol_m:
+                        cmds.extend(self._detour_reached(sample, p))
+                        return cmds
             if self._goal is not None and sample.pos.distance_to(self._goal) <= self.cfg.arrival_tol_m:
                 cmds.extend(self._episode_success(sample, circumnavigated=False))
             else:
@@ -400,8 +429,29 @@ class BugNavController:
                         self._attempt_failed(sample, "goal timeout", physical=False)
                     )
         elif self.phase == Phase.BACKTRACK:
-            if arrived or timed_out:
+            if arrived:
                 cmds.extend(self._advance_backtrack(sample))
+            else:
+                # The way out is NOT guaranteed clear (user
+                # 2026-11-11): something may have moved into the
+                # entry corridor after we came in.  Struggling en
+                # route, or a waypoint timing out with no real
+                # progress toward it, means the corridor is blocked
+                # NOW - detour, don't just skip the point.
+                ev = self.detector.feed(
+                    sample, window_s=self.cfg.detector.attempt_window_s)
+                progress = None
+                if (self._bt_start_dist is not None
+                        and self._pending_target is not None):
+                    progress = (self._bt_start_dist
+                                - sample.pos.distance_to(
+                                    self._pending_target))
+                if ev is not None or (
+                        timed_out and progress is not None
+                        and progress < self.cfg.backtrack_min_progress_m):
+                    cmds.extend(self._backtrack_blocked(sample))
+                elif timed_out:
+                    cmds.extend(self._advance_backtrack(sample))
         return cmds
 
     def _staging_point(self, theta_deg: float) -> Point:
@@ -474,6 +524,14 @@ class BugNavController:
         return cmds
 
     def _conclude_full_circle(self, sample: Sample) -> list[Command]:
+        if self._detour_goal is not None:
+            # A full circle around the obstacle sealing the exit,
+            # with no way through found: the robot is boxed into
+            # this area.  That is not "abandon" - it is trapped.
+            return self._declare_trapped(
+                sample,
+                "detour circled the obstacle blocking the exit "
+                "completely and found no way out of this area")
         cl = self._cluster
         assert cl is not None
         if cl.radius_m <= self.cfg.small_obstacle_radius_m:
@@ -518,6 +576,8 @@ class BugNavController:
             self.cfg.llm_strategy_enabled
             and self._consults_used < self.cfg.max_consults_per_episode
             and self.pending_consult is None
+            # Detours conclude deterministically: rejoin or trapped.
+            and self._detour_goal is None
         )
 
     def _situation(self, kind: str, sample: Sample) -> dict:
@@ -615,6 +675,8 @@ class BugNavController:
     def _episode_success(
         self, sample: Sample, *, circumnavigated: bool
     ) -> list[Command]:
+        if self._detour_goal is not None:
+            return self._detour_reached(sample, self._detour_goal)
         cl = self._cluster
         assert cl is not None
         st = self.stats[self._stats_key]
@@ -636,6 +698,8 @@ class BugNavController:
 
     # ----------------------------------------------------------- backtrack
     def _start_backtrack(self, sample: Sample) -> None:
+        self._detour_goal = None
+        self.detector.reset()
         self._backtrack_points = self.trail.reversed_waypoints(
             self.cfg.backtrack_spacing_m
         )
@@ -643,19 +707,106 @@ class BugNavController:
         if self._backtrack_points:
             self._pending_target = self._backtrack_points[0]
             self._deadline = sample.t + self.cfg.backtrack_timeout_s
+            self._bt_start_dist = sample.pos.distance_to(
+                self._pending_target)
         else:
             self._pending_target = None
             self._deadline = sample.t
+            self._bt_start_dist = None
 
     def _advance_backtrack(self, sample: Sample) -> list[Command]:
-        self._backtrack_points.pop(0)
+        if self._backtrack_points:
+            self._backtrack_points.pop(0)
         if self._backtrack_points:
             self._pending_target = self._backtrack_points[0]
             self._deadline = sample.t + self.cfg.backtrack_timeout_s
+            self._bt_start_dist = sample.pos.distance_to(
+                self._pending_target)
+            self.detector.reset()
             return [Command(CommandKind.CLEAN_AREA, point=self._pending_target)]
         cmds = [
             Command(CommandKind.NOTIFY, message="backtrack complete; resuming auto clean"),
             Command(CommandKind.RESUME_AUTO),
+        ]
+        self._end_episode(sample)
+        return cmds
+
+    def _backtrack_blocked(self, sample: Sample) -> list[Command]:
+        """The entry corridor is blocked NOW (user 2026-11-11: never
+        assume the way back stayed clear).  Detour with the same
+        perimeter exploration used for any obstacle - but the
+        objective is LEAVING THIS AREA, not regaining one exact
+        waypoint: the aim point is the far end of the remaining
+        breadcrumbs (the area exit), and rejoining the corridor at
+        ANY remaining point counts as success (see TO_GOAL).  Only
+        if the detour's full-circle exploration ALSO fails - cannot
+        regain the exit AND cannot leave the area at all - is the
+        robot declared trapped."""
+        pts = self._backtrack_points
+        if not pts and self._anchor is not None:
+            pts = self._backtrack_points = [self._anchor]
+        if not pts:
+            return self._declare_trapped(sample, "no entry path recorded")
+        self._detour_goal = pts[-1]
+        heading = angle_of(self._detour_goal - sample.pos)
+        return self._begin_episode(
+            sample, sample.pos, heading,
+            goal=self._detour_goal,
+            tried_sectors=set(),
+            skip_blacklist_check=True,
+            notify_text=(
+                "return path blocked by a new obstacle; detouring "
+                "with perimeter exploration toward the area exit"),
+        )
+
+    def _detour_reached(self, sample: Sample, point: Point) -> list[Command]:
+        """Back on the entry corridor, at or beyond the blockage.
+        Drop every breadcrumb up to the rejoined point and keep
+        leaving; if that was the exit point itself, we are out."""
+        self._detour_goal = None
+        while self._backtrack_points and self._backtrack_points[0] != point:
+            self._backtrack_points.pop(0)
+        if self._backtrack_points:
+            self._backtrack_points.pop(0)  # the rejoined point itself
+        self._cluster = None
+        self._goal = None
+        self.pending_consult = None
+        self.detector.reset()
+        self.perimeter.reset()
+        if self._backtrack_points:
+            self.phase = Phase.BACKTRACK
+            self._pending_target = self._backtrack_points[0]
+            self._deadline = sample.t + self.cfg.backtrack_timeout_s
+            self._bt_start_dist = sample.pos.distance_to(
+                self._pending_target)
+            return [
+                Command(CommandKind.NOTIFY,
+                        message="detour rejoined the entry path; "
+                                "continuing out"),
+                Command(CommandKind.CLEAN_AREA, point=self._pending_target),
+            ]
+        cmds = [
+            Command(CommandKind.NOTIFY,
+                    message="detour reached the area exit; "
+                            "resuming auto clean"),
+            Command(CommandKind.RESUME_AUTO),
+        ]
+        self._end_episode(sample)
+        return cmds
+
+    def _declare_trapped(self, sample: Sample, why: str) -> list[Command]:
+        """Exploration has PROVEN there is no way out (user
+        2026-11-11): stop, stay put, and raise the alarm for a
+        human.  Grinding on would only drain the battery."""
+        self._trapped_pos = sample.pos
+        self._detour_goal = None
+        cmds = [
+            Command(CommandKind.PAUSE),
+            Command(
+                CommandKind.NOTIFY,
+                message=(f"TRAPPED: no way out of this area ({why}); "
+                         "robot stopped and needs a human rescue"),
+            ),
         ]
         self._end_episode(sample)
         return cmds
@@ -665,6 +816,8 @@ class BugNavController:
         self.detector.reset()
         self.perimeter.reset()
         self.pending_consult = None
+        self._detour_goal = None
+        self._bt_start_dist = None
         self._cluster = None
         self._goal = None
         self._pending_target = None
