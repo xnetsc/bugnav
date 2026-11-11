@@ -100,6 +100,59 @@ class TestBacktrackDetour(unittest.TestCase):
         self.assertTrue(any("TRAPPED" in n for n in notes), notes)
         self.assertIsNotNone(ctl._trapped_pos)
 
+    def test_detour_prefers_exit_then_degrades_to_escape(self):
+        ctl = BugNavController(ControllerConfig())
+        ctl._cluster = ObstacleCluster(
+            hits=[Point(0.5, 0.0), Point(-0.5, 0.0),
+                  Point(0.0, 0.5), Point(0.0, -0.5)])
+        ctl._detour_goal = Point(-3.0, 0.0)  # the original exit
+        ctl._goal = ctl._detour_goal
+        ctl._detour_origin = Point(1.5, 0.0)  # pocket side is +x
+        ctl._swept_deg = 100.0
+        sample = Sample(t=10.0, pos=Point(1.2, 0.0),
+                        state=RobotState.PAUSED)
+        # Narrow exploration: objective stays the original exit.
+        self.assertEqual(ctl._detour_maybe_escape(sample), [])
+        self.assertEqual(ctl._goal, Point(-3.0, 0.0))
+        # Wide exploration without regaining it: degrade to
+        # "leave this area" - far side of the blocker from the pocket.
+        ctl._swept_deg = 200.0
+        cmds = ctl._detour_maybe_escape(sample)
+        self.assertTrue(any("leaving this area" in (c.message or "")
+                            for c in cmds))
+        self.assertTrue(ctl._detour_escape_mode)
+        self.assertLess(ctl._goal.x, -0.5)
+        # And it switches only once.
+        self.assertEqual(ctl._detour_maybe_escape(sample), [])
+
+    def test_escape_success_resumes_and_rejoin_still_wins(self):
+        escape = Point(-1.6, 0.0)
+        pts = [Point(-1.0, 3.0), Point(-2.0, 3.0), Point(-3.0, 3.0)]
+        ctl = _ctl_in_backtrack(pts, Point(0.0, 0.0))
+        ctl._detour_goal = pts[-1]
+        ctl._detour_escape_mode = True
+        ctl._goal = escape
+        ctl.phase = Phase.TO_GOAL
+        ctl._pending_target = escape
+        ctl._deadline = 100.0
+        # Reaching the escape point: out of the area, resume work.
+        cmds = ctl.tick(Sample(t=10.0, pos=escape,
+                               state=RobotState.CLEANING))
+        self.assertIn(CommandKind.RESUME_AUTO, _kinds(cmds))
+        self.assertNotEqual(ctl.phase, Phase.TO_GOAL)
+        # But if the corridor reappears mid-escape, rejoining wins.
+        ctl2 = _ctl_in_backtrack(pts, Point(0.0, 0.0))
+        ctl2._detour_goal = pts[-1]
+        ctl2._detour_escape_mode = True
+        ctl2._goal = escape
+        ctl2.phase = Phase.TO_GOAL
+        ctl2._pending_target = escape
+        ctl2._deadline = 100.0
+        cmds = ctl2.tick(Sample(t=10.0, pos=Point(-2.0, 3.0),
+                                state=RobotState.CLEANING))
+        self.assertEqual(ctl2.phase, Phase.BACKTRACK)
+        self.assertEqual(ctl2._backtrack_points, [Point(-3.0, 3.0)])
+
     def test_trapped_latch_waits_for_human(self):
         ctl = BugNavController(ControllerConfig())
         ctl._trapped_pos = Point(0.0, 0.0)

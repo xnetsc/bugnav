@@ -49,10 +49,15 @@ operations → verification checklist → rollback), in Chinese:
   is only the baseline route — it is never assumed to still be clear.
   If a new obstacle blocks it en route (struggle, or a waypoint
   timing out with no progress), the robot switches into the same
-  wall-following detour, with the objective of **leaving the area**:
-  it aims at the area exit at the far end of the trail, and
-  rejoining the corridor at *any* remaining breadcrumb counts as
-  success — it does not have to regain the exact previous waypoint.
+  wall-following detour. The return objective is prioritised:
+  **first choice is the original entrance** (the area exit at the
+  far end of the trail); if half a circle of exploration still
+  cannot regain it, the objective degrades to **leaving this area**
+  — out through any opening on the far side of the obstacle, able
+  to resume work, without fixating on the original exit. At any
+  moment during the process, if the exit corridor can be rejoined
+  (at *any* remaining breadcrumb), rejoining wins and the exit
+  continues along the original path.
   Only when that exploration has circled completely and can neither
   regain the exit nor leave the area at all is the robot declared
   **trapped**: it stops and raises the alarm for a human rescue —

@@ -96,6 +96,11 @@ class ControllerConfig:
     # alarm (user 2026-11-11) - its built-in sound, this many times -
     # not only the program's phone/Mac notification.
     trapped_sound_count: int = 3
+    # A backtrack detour prefers the ORIGINAL EXIT; only after the
+    # exploration has swept this much arc without regaining it does
+    # the objective degrade to "leave this area by any opening"
+    # (user 2026-11-11: do not fixate on the original exit).
+    detour_escape_after_sweep_deg: float = 180.0
     # Full circle on an obstacle this small = success (its perimeter is
     # then fully cleaned). Contact points sit one robot-clearance away
     # from the physical object, so a chair leg's cluster measures up to
@@ -157,6 +162,8 @@ class BugNavController:
         # While a backtrack detour runs, the area-exit point it aims
         # at; also serves as the "in detour" flag.
         self._detour_goal: Point | None = None
+        self._detour_origin: Point | None = None  # where the detour began
+        self._detour_escape_mode: bool = False  # objective degraded to "get out"
         # Boxed-in latch: set when trapped is declared; MONITOR stays
         # hands-off until a human visibly intervenes.
         self._trapped_pos: Point | None = None
@@ -517,6 +524,7 @@ class BugNavController:
                 f"swept {self._swept_deg:.0f}/360 deg",
             ),
         ]
+        cmds.extend(self._detour_maybe_escape(sample))
         if self._swept_deg >= 360.0 - 1e-6:
             cmds.extend(self._conclude_full_circle(sample))
         elif self._consult_available() and self._failures >= self.cfg.consult_after_failures:
@@ -680,6 +688,8 @@ class BugNavController:
         self, sample: Sample, *, circumnavigated: bool
     ) -> list[Command]:
         if self._detour_goal is not None:
+            if self._detour_escape_mode:
+                return self._detour_escaped(sample)
             return self._detour_reached(sample, self._detour_goal)
         cl = self._cluster
         assert cl is not None
@@ -703,6 +713,8 @@ class BugNavController:
     # ----------------------------------------------------------- backtrack
     def _start_backtrack(self, sample: Sample) -> None:
         self._detour_goal = None
+        self._detour_origin = None
+        self._detour_escape_mode = False
         self.detector.reset()
         self._backtrack_points = self.trail.reversed_waypoints(
             self.cfg.backtrack_spacing_m
@@ -752,6 +764,8 @@ class BugNavController:
         if not pts:
             return self._declare_trapped(sample, "no entry path recorded")
         self._detour_goal = pts[-1]
+        self._detour_origin = sample.pos
+        self._detour_escape_mode = False
         heading = angle_of(self._detour_goal - sample.pos)
         return self._begin_episode(
             sample, sample.pos, heading,
@@ -768,6 +782,8 @@ class BugNavController:
         Drop every breadcrumb up to the rejoined point and keep
         leaving; if that was the exit point itself, we are out."""
         self._detour_goal = None
+        self._detour_origin = None
+        self._detour_escape_mode = False
         while self._backtrack_points and self._backtrack_points[0] != point:
             self._backtrack_points.pop(0)
         if self._backtrack_points:
@@ -793,6 +809,46 @@ class BugNavController:
             Command(CommandKind.NOTIFY,
                     message="detour reached the area exit; "
                             "resuming auto clean"),
+            Command(CommandKind.RESUME_AUTO),
+        ]
+        self._end_episode(sample)
+        return cmds
+
+    def _detour_maybe_escape(self, sample: Sample) -> list[Command]:
+        """Tier switch for a backtrack detour (user 2026-11-11):
+        the ORIGINAL EXIT stays the preferred target; only when the
+        exploration has swept a wide arc without regaining it does
+        the objective degrade to 'leave this area by any opening'.
+        Rejoining the exit corridor remains possible - and preferred
+        - at every moment (the TO_GOAL rejoin check runs first)."""
+        if (self._detour_goal is None or self._detour_escape_mode
+                or self._swept_deg
+                < self.cfg.detour_escape_after_sweep_deg):
+            return []
+        cl = self._cluster
+        if cl is None or self._detour_origin is None:
+            return []
+        away = cl.centre - self._detour_origin
+        d = math.hypot(away.x, away.y)
+        if d < 1e-6:
+            return []
+        unit = away.scale(1.0 / d)
+        self._goal = cl.centre + unit.scale(
+            cl.radius_m + self._clearance_m + self.cfg.goal_depth_m)
+        self._detour_escape_mode = True
+        return [Command(CommandKind.NOTIFY, message=(
+            "original exit still unreachable after wide exploration; "
+            "switching objective to leaving this area by any opening"))]
+
+    def _detour_escaped(self, sample: Sample) -> list[Command]:
+        """Out of the area through another opening: the original
+        exit proved unreachable, but the robot is outside the pocket
+        and can work again - that is success enough (user
+        2026-11-11: do not fixate on the original exit)."""
+        cmds = [
+            Command(CommandKind.NOTIFY, message=(
+                "original exit unreachable; left this area by another "
+                "opening - resuming auto clean")),
             Command(CommandKind.RESUME_AUTO),
         ]
         self._end_episode(sample)
@@ -825,6 +881,8 @@ class BugNavController:
         self.perimeter.reset()
         self.pending_consult = None
         self._detour_goal = None
+        self._detour_origin = None
+        self._detour_escape_mode = False
         self._bt_start_dist = None
         self._cluster = None
         self._goal = None
