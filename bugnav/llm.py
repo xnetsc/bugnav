@@ -30,6 +30,19 @@ def llm_configured() -> bool:
     return bool(os.environ.get("BUGNAV_LLM_API_KEY"))
 
 
+def build_payload(model: str, messages: list[dict], *,
+                  json_mode: bool = True) -> dict:
+    """Chat-completions payload.  Every bugnav consumer parses the
+    reply as JSON (advisor Plan, supervisor Verdict), so JSON mode is
+    enforced at the API level via response_format - not merely
+    requested in the prompt (user 2026-11-11).  Both prompts do
+    mention JSON, which json_object mode requires."""
+    payload = {"model": model, "messages": messages}
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+    return payload
+
+
 async def chat(messages: list[dict], *, timeout_s: float = 120.0) -> str:
     """One chat-completions round trip; returns the assistant text."""
     import aiohttp
@@ -40,16 +53,25 @@ async def chat(messages: list[dict], *, timeout_s: float = 120.0) -> str:
             "BUGNAV_LLM_API_KEY is not set - LLM analysis is disabled")
     base = os.environ.get("BUGNAV_LLM_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
     model = os.environ.get("BUGNAV_LLM_MODEL", DEFAULT_MODEL)
-    payload = {"model": model, "messages": messages}
     headers = {"Authorization": f"Bearer {api_key}"}
     timeout = aiohttp.ClientTimeout(total=timeout_s)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(
-                f"{base}/chat/completions", json=payload,
-                headers=headers) as resp:
-            data = await resp.json()
-            if resp.status != 200:
-                raise RuntimeError(
-                    f"LLM endpoint returned {resp.status}: "
-                    f"{str(data)[:300]}")
-    return data["choices"][0]["message"]["content"]
+        for json_mode in (True, False):
+            payload = build_payload(model, messages, json_mode=json_mode)
+            async with session.post(
+                    f"{base}/chat/completions", json=payload,
+                    headers=headers) as resp:
+                data = await resp.json()
+                if resp.status == 200:
+                    return data["choices"][0]["message"]["content"]
+                # An endpoint that does not know response_format
+                # rejects the request outright; retry once without
+                # it rather than losing the whole AI layer (the
+                # prompts still demand JSON and the parsers stay
+                # tolerant).
+                if not (json_mode and resp.status == 400
+                        and "response_format" in str(data)):
+                    raise RuntimeError(
+                        f"LLM endpoint returned {resp.status}: "
+                        f"{str(data)[:300]}")
+    raise RuntimeError("LLM request failed")  # pragma: no cover

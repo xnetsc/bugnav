@@ -288,8 +288,10 @@ three-scenario end-to-end tests), `Dockerfile`, `docker-compose.yml`.
   LLM endpoint.
 - Implemented, pending on-robot verification with the next image
   pull and restart: whether `getWorkState` is accepted by the
-  firmware (the state-stream fix), whether the water-info
-  subscription is accepted, coordinate scale calibration (3 m
+  firmware (the state-stream fix), the water-info reading in
+  practice (the firmware answers; its customAmount payload shape
+  is handled by a local tolerant parser), coordinate scale
+  calibration (3 m
   two-point method) and sub-metre area commands, the playSound
   alert tone, the full active mode chain.
 - Known ceilings: no custom voice/intercom exists in the protocol

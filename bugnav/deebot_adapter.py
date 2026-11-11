@@ -202,6 +202,12 @@ class DeebotAdapter:
         password_hash = hashlib.md5(password.encode()).hexdigest()
 
         self._register_hardware_aliases(log)
+        # This firmware's getWaterInfo/getLifeSpan payloads predate
+        # nothing - they postdate the pinned library, whose strict
+        # parsers die on them.  Swap in tolerant handlers.
+        from .firmware_parsers import install_tolerant_parsers
+
+        install_tolerant_parsers()
         session = aiohttp.ClientSession()
         rest_cfg = create_rest_config(
             session,
