@@ -45,9 +45,9 @@ async def _main_async(cfg_path: str, mode: str) -> None:
     adapter = DeebotAdapter(AdapterConfig(**account))
     ctl_cfg = ControllerConfig()
     for k, v in raw.get("controller", {}).items():
-        if k == "detector":
+        if k in ("detector", "perimeter"):
             for dk, dv in v.items():
-                setattr(ctl_cfg.detector, dk, dv)
+                setattr(getattr(ctl_cfg, k), dk, dv)
         else:
             setattr(ctl_cfg, k, v)
     data_dir = raw.get("data_dir", "data")

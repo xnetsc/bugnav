@@ -20,6 +20,13 @@ Strategy (settled with the user):
     the breadcrumb trail in reverse (every exit waypoint was actually
     traversed on the way in), blacklist the spot for this session only,
     and resume.
+  * Second trigger, no struggle needed: if the firmware itself keeps
+    circling one spot and passing its opening by (perimeter loiter,
+    seen live 2026-11-11 at a U-shaped chair base), the second loiter
+    at the same spot in one session starts an episode whose goal is
+    the centre of the circled area - the pocket it never enters.  The
+    staging-ring exploration then tries that goal from successive
+    angles; the opening face is one of them.
 """
 
 from __future__ import annotations
@@ -31,7 +38,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from .clusters import ClusterManager, ObstacleCluster
-from .detector import DetectorConfig, StruggleDetector
+from .detector import (
+    DetectorConfig,
+    PerimeterConfig,
+    PerimeterDetector,
+    PerimeterEvent,
+    StruggleDetector,
+)
 from .geometry import Point, angle_of, polar, quantize_heading
 from .model import Command, CommandKind, EpisodeStats, RobotState, Sample
 from .strategist import Plan
@@ -82,6 +95,13 @@ class ControllerConfig:
     cooldown_s: float = 45.0
     backtrack_spacing_m: float = 0.45
     detector: DetectorConfig = field(default_factory=DetectorConfig)
+    perimeter: PerimeterConfig = field(default_factory=PerimeterConfig)
+    # A single perimeter loiter is common in the firmware's normal
+    # intensive cleaning, so it is only logged.  The robot coming back
+    # and loitering at the same spot again in the same session is the
+    # takeover signal (it circled the opening and passed it by, twice).
+    perimeter_escalations_required: int = 2
+    perimeter_repeat_radius_m: float = 0.6
     # LLM strategy advisor (see strategist.py). When enabled AND the
     # runner has an LLM configured, the fixed strategy consults the
     # advisor at its weak points instead of grinding on or giving up
@@ -100,6 +120,11 @@ class BugNavController:
     ):
         self.cfg = config or ControllerConfig()
         self.detector = StruggleDetector(self.cfg.detector)
+        self.perimeter = PerimeterDetector(self.cfg.perimeter)
+        # Perimeter-loiter bookkeeping for this session only (a chair
+        # moves; nothing here may outlive the session as a ban).
+        self._perimeter_visits: list[tuple[Point, int]] = []  # (centre, count)
+        self._perimeter_handled: list[Point] = []  # centres already taken over
         self.trail = BreadcrumbTrail()
         self.clusters = ClusterManager()
         self.phase = Phase.MONITOR
@@ -193,6 +218,9 @@ class BugNavController:
                 approach_heading_deg=sample.heading_deg or 0.0,
             )
         if event is None:
+            pe = self.perimeter.feed(sample)
+            if pe is not None:
+                return self._on_perimeter_event(sample, pe)
             return []
         # Approach heading = the direction it was travelling the last
         # time it was moving freely. (The trail and the struggle window
@@ -203,10 +231,81 @@ class BugNavController:
             approach = event.approach_heading_deg
         return self._begin_episode(sample, event.centre, approach)  # type: ignore[arg-type]
 
-    def _begin_episode(
-        self, sample: Sample, hit: Point, approach_heading_deg: float
+    def _on_perimeter_event(
+        self, sample: Sample, event: PerimeterEvent
     ) -> list[Command]:
-        cluster = self.clusters.find_or_create(hit)  # type: ignore[arg-type]
+        centre = event.centre  # type: ignore[assignment]
+        if any(
+            centre.distance_to(c) <= self.cfg.perimeter_repeat_radius_m
+            for c in self._perimeter_handled
+        ):
+            return []  # already took this spot over once this session
+        count = 1
+        for i, (c, n) in enumerate(self._perimeter_visits):
+            if centre.distance_to(c) <= self.cfg.perimeter_repeat_radius_m:
+                count = n + 1
+                self._perimeter_visits[i] = (c, count)
+                centre = c
+                break
+        else:
+            self._perimeter_visits.append((centre, 1))
+        if count < self.cfg.perimeter_escalations_required:
+            return [
+                Command(
+                    CommandKind.NOTIFY,
+                    message=(
+                        f"perimeter loiter #{count} at {centre} "
+                        f"(path {event.path_m:.1f} m, sweep {event.sweep_deg:.0f} deg); "
+                        "watching, no takeover yet"
+                    ),
+                )
+            ]
+        # Repeat loiter at the same spot: the firmware circled this
+        # obstacle and passed its opening by, more than once.  Take
+        # over and aim at the middle of the ring it kept walking
+        # around - the pocket it never enters.
+        self._perimeter_handled.append(centre)
+        # Seed the cluster from the loiter outline directly: opposite
+        # extremes of the ring can be ~1.3 m apart, beyond the hit-merge
+        # distance, so find_or_create per point could split the ring
+        # into two clusters.
+        cluster = self.clusters.nearest(centre)
+        if cluster is not None and centre.distance_to(
+            cluster.centre
+        ) <= self.clusters.merge_distance_m + cluster.radius_m:
+            for p in event.ring_points:
+                cluster.add_hit(p)
+        else:
+            cluster = ObstacleCluster(hits=list(event.ring_points))
+            self.clusters.clusters.append(cluster)
+        approach = angle_of(cluster.centre - sample.pos)
+        return self._begin_episode(
+            sample,
+            sample.pos,
+            approach,
+            cluster=cluster,
+            goal=cluster.centre,
+            tried_sectors=set(),
+            notify_text=(
+                f"perimeter loiter #{count} at {cluster.centre}; firmware "
+                "keeps circling without entering - taking over, goal is "
+                "the centre of the circled area"
+            ),
+        )
+
+    def _begin_episode(
+        self,
+        sample: Sample,
+        hit: Point,
+        approach_heading_deg: float,
+        *,
+        cluster: ObstacleCluster | None = None,
+        goal: Point | None = None,
+        tried_sectors: set[int] | None = None,
+        notify_text: str | None = None,
+    ) -> list[Command]:
+        if cluster is None:
+            cluster = self.clusters.find_or_create(hit)  # type: ignore[arg-type]
         self._cluster = cluster
         self._anchor = self.trail.freeze()
         cmds = [Command(CommandKind.PAUSE)]
@@ -226,10 +325,18 @@ class BugNavController:
             self._start_backtrack(sample)
             return cmds
 
-        self._goal = hit + polar(approach_heading_deg, self.cfg.goal_depth_m)  # type: ignore[operator]
+        self._goal = (
+            goal
+            if goal is not None
+            else hit + polar(approach_heading_deg, self.cfg.goal_depth_m)  # type: ignore[operator]
+        )
         self._theta_deg = angle_of(hit - cluster.centre) if cluster.hits else approach_heading_deg  # type: ignore[operator]
         self._swept_deg = 0.0
-        self._tried_sectors = {quantize_heading(approach_heading_deg)}
+        self._tried_sectors = (
+            tried_sectors
+            if tried_sectors is not None
+            else {quantize_heading(approach_heading_deg)}
+        )
         self._error_pause_sent = False
         self._consults_used = 0
         self._failures = 0
@@ -240,7 +347,8 @@ class BugNavController:
         cmds.append(
             Command(
                 CommandKind.NOTIFY,
-                message=(
+                message=notify_text
+                or (
                     f"struggle detected at {hit}, approach {approach_heading_deg:.0f} deg "
                     f"failed; starting perimeter exploration"
                 ),
@@ -571,6 +679,7 @@ class BugNavController:
     def _end_episode(self, sample: Sample) -> None:
         self.trail.unfreeze()
         self.detector.reset()
+        self.perimeter.reset()
         self.pending_consult = None
         self._cluster = None
         self._goal = None
