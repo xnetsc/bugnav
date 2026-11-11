@@ -144,6 +144,10 @@ class Verdict:
     message: str = ""
     reason: str = ""
     resume_charge_pct: int | None = None
+    # Optional charge-model calibration FROM the raw history in the
+    # digest (user 2026-11-11: the AI corrects the parameters; code
+    # only validates the shape and applies them).
+    charge_model_update: dict | None = None
 
 
 class SessionWatch:
@@ -179,6 +183,12 @@ class SessionWatch:
         # Rolling history: (sample.t, battery_pct, unique cells so far)
         self._history: deque = deque()
         self._pace_hist: deque = deque()  # (t, distinct cell count)
+        # Raw charge history: recent dock stays with their SOC
+        # trajectory marks.  Recorded faithfully and handed to the
+        # supervisor LLM, which does the CALIBRATING - code invents
+        # no correction scheme of its own (user 2026-11-11).
+        self._charge_history: deque = deque(maxlen=12)
+        self._dock_stay: dict | None = None
         # Virtual water gauge state.
         self.water_amount: int | None = None
         self._water_cells: set[tuple[int, int]] = set()
@@ -303,6 +313,31 @@ class SessionWatch:
                 self._charge_review_pending = False
         else:  # PAUSED / ERROR / UNKNOWN: bout state unchanged
             self.cleaning_now = False
+
+        # Charge-history recording: while docked, log the SOC
+        # trajectory (a mark every +2%); on undocking, file the stay.
+        # Raw material only - the supervisor LLM calibrates the
+        # charge model from it (charge_model_update verdicts).
+        if state == RobotState.DOCKED and self.battery_pct is not None:
+            if self._dock_stay is None:
+                self._dock_stay = {
+                    "soc0": self.battery_pct, "t0": sample.t,
+                    "marks": [[self.battery_pct, 0.0]]}
+            else:
+                marks = self._dock_stay["marks"]
+                if self.battery_pct - marks[-1][0] >= 2:
+                    marks.append([self.battery_pct, round(
+                        (sample.t - self._dock_stay["t0"]) / 60, 1)])
+        elif self._dock_stay is not None:
+            stay, self._dock_stay = self._dock_stay, None
+            mins = (sample.t - stay["t0"]) / 60
+            if mins >= 1 and self.battery_pct is not None:
+                stay["marks"].append(
+                    [self.battery_pct, round(mins, 1)])
+                self._charge_history.append({
+                    "start_soc": stay["soc0"],
+                    "minutes": round(mins, 1),
+                    "marks": stay["marks"]})
 
         if sample.error_code:
             self.errors[sample.error_code] += 1
@@ -455,6 +490,15 @@ class SessionWatch:
             advancing = round(new_m2 / (eff_t / 60.0), 2)
         return round(low_t / clean_t, 2), advancing
 
+    def charge_history(self) -> list[dict]:
+        """Recent dock stays (copies): start_soc, minutes, SOC marks."""
+        return [dict(s) for s in self._charge_history]
+
+    def restore_charge_history(self, stays: list[dict]) -> None:
+        self._charge_history.clear()
+        for s in stays[-12:]:
+            self._charge_history.append(dict(s))
+
     def water_pct_est(self) -> float:
         """Virtual water gauge: 100 after a station wash/refill, then
         drains by spray amount x area mopped since (user-settled model;
@@ -566,7 +610,8 @@ class SessionWatch:
                charge_plan: dict | None = None,
                charge_model: ChargeModel | None = None,
                home_set: set | None = None,
-               blocked_m2: float | None = None) -> dict:
+               blocked_m2: float | None = None,
+               charge_history: list | None = None) -> dict:
         revisit = 0.0
         if self.cell_entries:
             revisit = round(1.0 - len(self.cells) / self.cell_entries, 2)
@@ -686,13 +731,19 @@ class SessionWatch:
                         eta["projected_total_span_min"] / expected_cons, 2)
         if charge_plan is not None:
             d["deterministic_charge_plan"] = charge_plan
+        if charge_model is not None:
+            d["charge_model_in_use"] = {
+                "band_rates": [list(b) for b in charge_model.band_rates],
+                "drain_pct_per_m2": charge_model.drain_pct_per_m2}
+        if charge_history:
+            d["charge_history_recent"] = charge_history[-6:]
         return d
 
 
 SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清扫的统计摘要（含电量、覆盖/剩余面积估算，以及一个确定性充电规划器给出的建议）。总目标：让「清扫+充电+回站开销」的总耗时最短——早上 7 点的任务不许拖到晚上 8 点。
 
 只输出一个 JSON 对象，不要其他文字：
-{"action": "continue|notify|abandon_current|stop_session|ask_user", "message": "给用户看的一句话（notify/stop_session/ask_user 时必填，简体中文）", "reason": "判断依据，一句话", "resume_charge_pct": 可选整数}
+{"action": "continue|notify|abandon_current|stop_session|ask_user", "message": "给用户看的一句话（notify/stop_session/ask_user 时必填，简体中文）", "reason": "判断依据，一句话", "resume_charge_pct": 可选整数, "charge_model_update": 可选，见充电参数矫正}
 
 判断要点：
 - continue：一切正常，或虽慢但合理（大户型、首次建图）。
@@ -709,6 +760,7 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 - 充电标准是个平衡题，不是「必须一次充够扫完剩余」：天平一端是「一口气扫完剩余」——摘要的 resume_soc_to_guarantee_finish 是它需要的出发电量（按当前耗电估算加安全系数），充到它意味着等得久些、但后面零回站；另一端是「分多轮」——少充快走，代价是每多一轮就多付一遍回站开销（回程+洗拖布+复位，规划器按约 5 分钟/轮计）外加多轮的充电尾段损耗。deterministic_charge_plan 就是规划器在这架天平上按总时间算出的平衡点，charge_options 把每一档的价格都摊开了。对照着判断：剩余越少，一口气的等待越短、越划算；剩余越多，死等一口气越可能把总跨度撑爆，分轮反而总时间更短。用 resume_charge_pct 覆盖规划器时，等于你在天平上另选一点，要在 reason 里说清往哪端偏、为什么。唯一的下限是别碎成短周期抖动那种碎法——每一轮出发都要能扫出像样的面积。
 - 充电等待也是成本（摘要 charge_options 给每个候选续扫电量标了「还要等多久、几点能走（ready_at）、能换多少面积」）：若充到高电量（如 80%）意味着要等三四个小时，那不可接受——哪怕它名义上能保证扫完。宁可选低一档（如 50%）先扫出一个可接受的面积、把主体扫完就收尾，零头留到下次。这条与上一条平衡题一起看：保证数只是天平一端的价格标签，不是必须达到的下限；它高到要等数小时，就往分轮一端偏，降档先扫出可接受面积、主体扫完收尾、零头留到下次，不要为最后一点面积把全天耗在充电等待上。记住底线是整场总跨度（摘要 projected_total_span_min）：已花的时间、充电等待、剩余清扫是一个整体——这个总和被撑到不可接受的程度（如跨大半天、顶进深夜），就必须降档或收尾。这条优先于一切比率判断：即使 projected_vs_expected_ratio 完全正常、速度与面积相称、慢得「有道理」，只要预计总跨度本身已不可接受，照样收尾——复杂度可以解释速度慢，解释不了无限长；不管什么速度，总清扫时间不许被撑到无法接受。
 - 时段锚点：上午发起的任务，拖到下午四五点还在续扫、且 projected_vs_expected_ratio 显示已明显超出与面积相称的预期（或剩余极少却还要再充一轮），是强收尾信号，stop_session；若比率正常、纯粹面积大且推进稳，不算异常。无论如何不要让它无必要地跨过晚间居家时段继续耗。
+- 充电参数矫正（由你持续做）：充电不是线性的——低电量段充得快、高电量段充得慢（如 30%→50% 可能只要 10 分钟，50%→80% 却要 30 分钟），而且这台机器的真实曲线会随电池状态漂移。摘要的 charge_history_recent 是最近几次回站充电的原始记录（marks 是 [电量%, 已用分钟] 轨迹打点），charge_model_in_use 是当前在用的分段速率与单位面积耗电。对照两者：若某电量段的实测速度与在用参数明显对不上、或耗电率漂移了，就在裁决里加 "charge_model_update": {"band_rates": [[上限电量, %/分钟], ... 一直覆盖到 100], "drain_pct_per_m2": 数值}（两项可只给一项），给出你矫正后的参数，系统会采用并长期保存、后续规划都用新参数。只依据实测历史矫正，没有足够历史或对不上不明显时不要带这个字段——保持原参数好过凭空乱改。
 以上是判断逻辑，不是死规则：结合摘要全貌（进度、速度、电量、时刻、已投入时长）综合裁量；拿不准时先认可规划器的平衡点，或倾向于「少折腾」。
 - 单场时长与作息常识（每次裁决都要合并判断，不要孤立看任何单个数字）：
   · 合理时长不看绝对钟点、看与计划面积是否相称：摘要的 expected_total_min_for_planned_area 是按合理清扫速度扫完计划面积本应花的总时间（含必要充电），projected_vs_expected_ratio 是「已花+预计总跨度」与它的比值。比值越接近 1，效率越与面积相称；比值明显大于 1，说明效率出了问题（重扫、推进塌陷、充电策略不当），偏离越大越不合理，应考虑 stop_session、剩余留到下一次，不要为「扫完」无限续扫。但比率只判效率、不判可接受性：无论速度多合理，总跨度底线（见充电条）优先于比率。这里和下文所有数字都是测量与算术，不是阈值规则——多少算过分，由你综合判断，不要用写死的「几小时」一刀切。home_note 与 normal_session_max_min 是用户按自家情况给的经验参考：范围信息（扫哪些房间）照用，时长与面积推导冲突时以面积推导为准。
@@ -755,4 +807,39 @@ def parse_verdict(text: str) -> Verdict:
         message=str(raw.get("message", ""))[:200],
         reason=str(raw.get("reason", ""))[:300],
         resume_charge_pct=pct,
+        charge_model_update=_valid_model_update(
+            raw.get("charge_model_update")),
     )
+
+
+def _valid_model_update(raw) -> dict | None:
+    """Shape-check an AI-proposed charge-model calibration.
+
+    Validation only - monotonic band tops covering 100, rates and
+    drain inside physical sanity bounds.  The VALUES are the AI's,
+    derived from the raw charge history; code has no scheme of its
+    own for what they should be."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict = {}
+    bands = raw.get("band_rates")
+    if isinstance(bands, list) and bands:
+        parsed: list[tuple[int, float]] = []
+        last_top, ok = 0, True
+        for pair in bands:
+            try:
+                top, rate = int(pair[0]), float(pair[1])
+            except (TypeError, ValueError, IndexError):
+                ok = False
+                break
+            if not (last_top < top <= 100 and 0 < rate <= 5):
+                ok = False
+                break
+            parsed.append((top, rate))
+            last_top = top
+        if ok and last_top == 100:
+            out["band_rates"] = parsed
+    drain = raw.get("drain_pct_per_m2")
+    if isinstance(drain, (int, float)) and 0.05 <= float(drain) <= 3:
+        out["drain_pct_per_m2"] = float(drain)
+    return out or None

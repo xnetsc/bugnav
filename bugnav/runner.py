@@ -124,6 +124,26 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                 saved.get("drain_pct_per_m2", charge_model.drain_pct_per_m2))
             charge_model.overhead_s = float(
                 saved.get("overhead_s", charge_model.overhead_s))
+            if saved.get("band_rates"):
+                charge_model.band_rates = [
+                    (int(t), float(r)) for t, r in saved["band_rates"]]
+        except Exception:
+            pass
+    history_path = os.path.join(data_dir, "charge_history.json")
+
+    def _save_charge_state() -> None:
+        """Persist the charge model (incl. AI-calibrated band rates)
+        and the raw charge history the calibration feeds on."""
+        try:
+            with open(model_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "drain_pct_per_m2": charge_model.drain_pct_per_m2,
+                    "overhead_s": charge_model.overhead_s,
+                    "band_rates": [list(b)
+                                   for b in charge_model.band_rates],
+                }, f)
+            with open(history_path, "w", encoding="utf-8") as f:
+                json.dump({"stays": watch.charge_history()}, f)
         except Exception:
             pass
 
@@ -140,9 +160,17 @@ async def _main_async(cfg_path: str, mode: str) -> None:
         "bout_was_open": False,
     }
 
+    if os.path.exists(history_path):
+        try:
+            with open(history_path, encoding="utf-8") as f:
+                watch.restore_charge_history(json.load(f)["stays"])
+        except Exception:
+            pass
+
     def _maintain_home_cache() -> None:
         """Bout-end cache maintenance (see candidate_decision)."""
         nonlocal candidate_cells
+        _save_charge_state()
         bout = set(watch.cells)
         decision = sup_mod.candidate_decision(
             bout, home_cells, candidate_cells, sup_cfg)
@@ -237,7 +265,8 @@ async def _main_async(cfg_path: str, mode: str) -> None:
             home_cells=len(home_cells) or None,
             robot_state=sample.state.value, charge_plan=plan,
             charge_model=charge_model, home_set=home_cells,
-            blocked_m2=blocked_m2)
+            blocked_m2=blocked_m2,
+            charge_history=watch.charge_history())
         verdict = sup_mod.Verdict()
         try:
             text = await llm_mod.chat(sup_mod.build_messages(digest))
@@ -246,6 +275,18 @@ async def _main_async(cfg_path: str, mode: str) -> None:
             log(f"supervisor call failed: {exc}; continuing")
         log(f"supervisor verdict: {verdict.action} "
             f"reason={verdict.reason!r} resume_pct={verdict.resume_charge_pct}")
+        if verdict.charge_model_update:
+            # AI calibration from the raw history: adopt its values
+            # (shape already validated), persist for every future
+            # plan.  Applies in observe too - learning is not control.
+            upd = verdict.charge_model_update
+            if "band_rates" in upd:
+                charge_model.band_rates = [tuple(b)
+                                           for b in upd["band_rates"]]
+            if "drain_pct_per_m2" in upd:
+                charge_model.drain_pct_per_m2 = upd["drain_pct_per_m2"]
+            _save_charge_state()
+            log(f"charge model calibrated by supervisor: {upd}")
         if verdict.action == "notify" and verdict.message:
             log(f"NOTIFY: supervisor: {verdict.message}")
         elif (verdict.action == "ask_user"

@@ -414,6 +414,55 @@ class TestComplexityAccounting(unittest.TestCase):
         self.assertIn("扫不完", SYSTEM)
         self.assertIn("必须用 notify", SYSTEM)
 
+    def test_charge_history_recorded_raw(self):
+        # Raw dock stays are recorded with SOC trajectory marks -
+        # no code-side correction scheme attached.
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        for i in range(45):
+            t = i * 15.0
+            w.feed(Sample(t, Point(0.0, 0.0), RobotState.DOCKED, 0.0),
+                   "monitor", 1_700_000_000.0 + t,
+                   battery=30 + (i * 15) // 30)
+        w.feed(Sample(675.0, Point(0.5, 0.0), RobotState.CLEANING, 0.0),
+               "monitor", 1_700_000_675.0, battery=52)
+        hist = w.charge_history()
+        self.assertEqual(len(hist), 1)
+        self.assertEqual(hist[0]["start_soc"], 30)
+        self.assertAlmostEqual(hist[0]["minutes"], 11.2, delta=0.2)
+        self.assertEqual(hist[0]["marks"][-1][0], 52)
+        socs = [m[0] for m in hist[0]["marks"]]
+        self.assertEqual(socs, sorted(socs))
+
+    def test_ai_charge_model_update_parsing(self):
+        # User (2026-11-11): the AI calibrates the charge model from
+        # history; code validates shape only.
+        v = parse_verdict(
+            '{"action": "continue", "charge_model_update": '
+            '{"band_rates": [[50, 2.0], [80, 1.0], [100, 0.4]], '
+            '"drain_pct_per_m2": 0.5}}')
+        self.assertEqual(v.charge_model_update["band_rates"],
+                         [(50, 2.0), (80, 1.0), (100, 0.4)])
+        self.assertEqual(
+            v.charge_model_update["drain_pct_per_m2"], 0.5)
+        bad = parse_verdict(
+            '{"action": "continue", "charge_model_update": '
+            '{"band_rates": [[50, 9.0], [100, 0.4]]}}')
+        self.assertIsNone(bad.charge_model_update)
+        self.assertIn("charge_model_update", SYSTEM)
+        self.assertIn("charge_history_recent", SYSTEM)
+
+    def test_digest_carries_history_and_model_in_use(self):
+        from bugnav.chargeplan import ChargeModel
+
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        _sweep(w, 40, 0.0, 100, 90)
+        d = w.digest(1_700_000_000.0 + 1000.0, "monitor",
+                     home_cells=80, charge_model=ChargeModel(),
+                     charge_history=[{"start_soc": 30, "minutes": 11.0,
+                                      "marks": [[30, 0.0], [52, 11.0]]}])
+        self.assertIn("charge_model_in_use", d)
+        self.assertEqual(d["charge_history_recent"][0]["start_soc"], 30)
+
     def test_ask_user_verdict_and_timeout_default(self):
         # User (2026-11-11): when the supervisor hands the choice to
         # the user, 5 minutes without feedback = return & end.
