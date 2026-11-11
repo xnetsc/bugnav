@@ -93,7 +93,6 @@ class SupervisorConfig:
     short_segment_max_m2: float = 8.0
     thrash_end_batt_max: int = 30  # segment must end at/below this
     thrash_segments: int = 2  # this many short ones in a row = thrash
-    thrash_resume_floor_pct: int = 95  # forced resume floor on thrash
 
 
 def home_consistency(bout_cells: set, cached_cells: set,
@@ -173,6 +172,7 @@ class SessionWatch:
         self._was_returning = False
         # Rolling history: (sample.t, battery_pct, unique cells so far)
         self._history: deque = deque()
+        self._pace_hist: deque = deque()  # (t, distinct cell count)
         # Virtual water gauge state.
         self.water_amount: int | None = None
         self._water_cells: set[tuple[int, int]] = set()
@@ -213,6 +213,7 @@ class SessionWatch:
                 self.errors = Counter()
                 self.bout_start_battery = self.battery_pct
                 self._history.clear()
+                self._pace_hist.clear()
                 self.segments = []
                 self._seg_open = False
                 self._had_dock_this_bout = False
@@ -244,6 +245,11 @@ class SessionWatch:
                 self.cells.add(cell)
                 self._water_cells.add(cell)
                 self._last_cell = cell
+            self._pace_hist.append((sample.t, len(self.cells)))
+            while (self._pace_hist
+                   and sample.t - self._pace_hist[0][0]
+                   > self.cfg.rolling_window_s):
+                self._pace_hist.popleft()
             if self.battery_pct is not None:
                 self._history.append(
                     (sample.t, self.battery_pct, len(self.cells)))
@@ -413,6 +419,36 @@ class SessionWatch:
         span = self._rolling_span()
         return span is not None and span[1] < 1.0
 
+    def _window_pace_split(self) -> tuple[float, float | None] | None:
+        """Split the rolling window's cleaning time into low-yield
+        time (cleaning but gaining NO new cell - probing around an
+        obstacle, escaping, re-cleaning; honest progress there is
+        ~zero, user 2026-11-11) and advancing time.  Returns
+        (low_yield_share, advancing_pace_m2_per_min|None).  Pure
+        measurement: what it MEANS is the supervisor's call."""
+        h = self._pace_hist
+        if len(h) < 8:
+            return None
+        clean_t = low_t = 0.0
+        prev = None
+        for t1, c1 in h:
+            if prev is not None:
+                t0, c0 = prev
+                dt = min(t1 - t0, 15.0)
+                if dt > 0:
+                    clean_t += dt
+                    if c1 <= c0:
+                        low_t += dt
+            prev = (t1, c1)
+        if clean_t < 120:
+            return None
+        new_m2 = (h[-1][1] - h[0][1]) * CELL_AREA_M2
+        advancing = None
+        eff_t = clean_t - low_t
+        if eff_t >= 60 and new_m2 > 0:
+            advancing = round(new_m2 / (eff_t / 60.0), 2)
+        return round(low_t / clean_t, 2), advancing
+
     def water_pct_est(self) -> float:
         """Virtual water gauge: 100 after a station wash/refill, then
         drains by spray amount x area mopped since (user-settled model;
@@ -556,6 +592,11 @@ class SessionWatch:
             "water_note": "virtual gauge: 100% after each station wash/"
                           "refill, drains by spray amount x area since",
         }
+        split = self._window_pace_split()
+        if split is not None:
+            d["low_yield_share_recent"] = split[0]
+            if split[1] is not None:
+                d["advancing_pace_m2_per_min"] = split[1]
         if self._water_reset_t is not None and self._last is not None:
             d["minutes_since_water_reset"] = round(
                 (self._last.t - self._water_reset_t) / 60, 1)
@@ -663,8 +704,9 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 - 时段锚点：上午发起的任务，拖到下午四五点还在续扫、且 projected_vs_expected_ratio 显示已明显超出与面积相称的预期（或剩余极少却还要再充一轮），是强收尾信号，stop_session；若比率正常、纯粹面积大且推进稳，不算异常。无论如何不要让它无必要地跨过晚间居家时段继续耗。
 以上是判断逻辑，不是死规则：结合摘要全貌（进度、速度、电量、时刻、已投入时长）综合裁量，拿不准时倾向于「少折腾」：要么一次充够扫完，要么干脆收尾。
 - 单场时长与作息常识（每次裁决都要合并判断，不要孤立看任何单个数字）：
-  · 合理时长不看绝对钟点、看与计划面积是否相称：摘要的 expected_total_min_for_planned_area 是按合理清扫速度扫完计划面积本应花的总时间（含必要充电），projected_vs_expected_ratio 是「已花+预计总跨度」与它的比值。比值在约 1.3 以内，就是与面积相称的正常清扫——哪怕绝对时长很长也不要停；比值明显偏大（如 2 倍上下），说明效率出了问题（重扫、推进塌陷、充电策略不当），那才是不合理，应考虑 stop_session、剩余留到下一次，不要为「扫完」无限续扫。不要用写死的「几小时」一刀切。home_note 与 normal_session_max_min 是用户按自家情况给的经验参考：范围信息（扫哪些房间）照用，时长与面积推导冲突时以面积推导为准。
-  · 环境复杂度要计价：障碍多的环境推进慢是正常代价，且名义面积里有一块是障碍占住、永远扫不到的。摘要若带 blocked_area_est_m2 / cleanable_area_est_m2，预期时长已按可扫面积算；另有保守预期（expected_total_min_conservative、projected_vs_conservative_ratio）是按本环境已证明的速度算的——先看保守比率：落在乐观与保守之间属于复杂环境的正常成本，不算异常；连保守预期都明显超出，才是真问题。
+  · 合理时长不看绝对钟点、看与计划面积是否相称：摘要的 expected_total_min_for_planned_area 是按合理清扫速度扫完计划面积本应花的总时间（含必要充电），projected_vs_expected_ratio 是「已花+预计总跨度」与它的比值。比值越接近 1 越与面积相称——哪怕绝对时长很长，只要比率相称就不要停；比值明显大于 1，说明效率出了问题（重扫、推进塌陷、充电策略不当），偏离越大越不合理，应考虑 stop_session、剩余留到下一次，不要为「扫完」无限续扫。这里和下文所有数字都是测量与算术，不是阈值规则——多少算过分，由你综合判断，不要用写死的「几小时」一刀切。home_note 与 normal_session_max_min 是用户按自家情况给的经验参考：范围信息（扫哪些房间）照用，时长与面积推导冲突时以面积推导为准。
+  · 环境复杂度要计价：障碍多的环境推进慢是正常代价，且名义面积里有一块是障碍占住、永远扫不到的。摘要若带 blocked_area_est_m2 / cleanable_area_est_m2，预期时长已按可扫面积算；另有保守预期（expected_total_min_conservative、projected_vs_conservative_ratio）是按本环境已证明的速度算的——先看保守比率：落在乐观与保守之间，多半是复杂环境的正常成本；连保守预期都超出一大截，才更像真问题。
+  · 试探时间单独看：low_yield_share_recent 是最近一段时间「在清扫、却没扫到新面积」的时间占比（绕障试探、脱困、重扫都在内），advancing_pace_m2_per_min 是剔除这段时间后的推进速度。试探期间推进接近零是合理的，demonstrated_pace 已把试探成本算进整体——判断整体进度用含试探的速度，不要拿 advancing_pace 去要求含试探的整体，也不要因为某段时间没进展就直接判异常。
   · 结合当前时刻与普通人作息：深夜至清晨（约 23:00–07:00）一般不应持续作业、更不应再放它出去续扫，除非任务开始时间表明这就是用户有意安排的时段；晚间居家时段长时间轰鸣也有打扰成本，已扫很久时倾向收尾。
   · 合并看三件事：已扫时长相对面积预期是否失衡（projected_vs_expected_ratio）、预计还要多久（eta_minutes_left / eta_finish）、当前时刻（now）。比率失衡 + 还要很久 + 时段不对，任意两条叠加就应认真考虑 stop_session 并在 message 里说明。
 - 不必全覆盖（收尾宽容）：清扫没有「不遗漏任何区域」的义务，100% 覆盖不是目标，总耗时最短才是。覆盖率要对着可扫面积看（coverage_pct_of_cleanable）：障碍占住、进不去的区域不计入「剩下多少」；可扫部分已基本扫完，就不要为名义覆盖率不满而继续耗。已经扫了很久（如四五个小时）且计划区域的多数已经扫完（coverage_pct_of_home 约 85% 以上）时，剩下的零头不值得再花时间、更不值得再充一轮电去追——直接 stop_session 收尾就是合理选择，在 message 里说明已完成大部分、剩余留待下次即可。一般地，每次都要算剩余的「性价比」：剩余面积 vs 预计耗时（eta）vs 已投入时长；已投入越久，为零头继续的门槛应越高，已花的时长是沉没成本，不构成继续扫的理由。

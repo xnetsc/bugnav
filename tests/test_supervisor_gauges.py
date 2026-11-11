@@ -377,6 +377,34 @@ class TestComplexityAccounting(unittest.TestCase):
         self.assertIn("保守预期", SYSTEM)
         self.assertIn("复杂度", SYSTEM)
 
+    def test_low_yield_share_measures_probing_time(self):
+        # User (2026-11-11): time spent probing around an obstacle
+        # legitimately progresses ~nowhere; surface it as a measured
+        # share instead of letting it silently poison the pace.
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        for i in range(14):
+            w.feed(Sample(i * 15.0, Point(0.1, 0.1),
+                          RobotState.CLEANING, 0.0),
+                   "monitor", 1_700_000_000.0 + i * 15.0, battery=90)
+        split = w._window_pace_split()
+        self.assertIsNotNone(split)
+        self.assertEqual(split[0], 1.0)  # all probing, no new cells
+
+    def test_advancing_pace_excludes_low_yield(self):
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        _sweep(w, 40, 0.0, 100, 90)  # every sample gains a new cell
+        d = w.digest(1_700_000_000.0 + 1000.0, "monitor")
+        self.assertEqual(d["low_yield_share_recent"], 0.0)
+        self.assertGreater(d["advancing_pace_m2_per_min"], 0)
+
+    def test_no_hardcoded_thrash_floor(self):
+        # User (2026-11-11): conclusions belong to the AI, not code -
+        # the forced 95% resume floor is gone; thrash stays a
+        # measured flag in the digest for the supervisor to weigh.
+        self.assertFalse(hasattr(SupervisorConfig(),
+                                 "thrash_resume_floor_pct"))
+        self.assertIn("low_yield_share_recent", SYSTEM)
+
 
 class TestHomeCacheConsistency(unittest.TestCase):
     """User (2026-11-11): robot taken to another home / new map /
