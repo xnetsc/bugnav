@@ -18,6 +18,13 @@ spamming a traceback on every refresh (observed live 2026-11-11):
   component and raises on the first type newer than the library
   (cleaningSolution, sewageBox, ...), discarding the whole list.
   The tolerant handler skips unknown components and keeps the rest.
+* resetLifeSpan over MQTT p2p: commands other clients send are
+  mirrored to every client and rebuilt by
+  CommandMqttP2P.create_from_mqtt, whose argument conversion raises
+  DeebotError on the same unknown LifeSpan values - observed live
+  2026-11-11 with a mirrored resetLifeSpan for 'cleaningSolution',
+  dropped with a traceback.  The converter gets a LifeSpan-only
+  fallback that hands back a value-carrying stand-in.
 
 The patch replaces the two handler classmethods on the library's own
 command classes, so every dispatch route (message registry, legacy
@@ -91,6 +98,49 @@ def _tolerant_life_span(cls, event_bus: EventBus,
     return HandlingResult.success()
 
 
+class _UnknownLifeSpan:
+    """Stand-in for a LifeSpan member the pinned library predates.
+
+    Only ``.value`` is read on the path that needs it
+    (ResetLifeSpan.__init__ builds {"type": life_span.value}), and a
+    mirrored command is never executed by this client - at most it
+    triggers a LifeSpanEvent refresh, whose response the tolerant
+    body handler above already filters."""
+
+    def __init__(self, value) -> None:
+        self.value = value
+
+    def __repr__(self) -> str:
+        return f"<unknown LifeSpan {self.value!r}>"
+
+
+def _install_tolerant_p2p_lifespan() -> None:
+    """Let p2p command reconstruction survive new LifeSpan values.
+
+    Wraps deebot_client.command._pop_or_raise: a LifeSpan conversion
+    failure falls back to _UnknownLifeSpan; every other type keeps
+    the library's strict behaviour.  Idempotent."""
+    import deebot_client.command as command_mod
+    from deebot_client.events import LifeSpan
+    from deebot_client.exceptions import DeebotError
+
+    orig = command_mod._pop_or_raise
+    if getattr(orig, "_bugnav_tolerant", False):
+        return
+
+    def tolerant(name, type_, data):
+        if type_ is not LifeSpan:
+            return orig(name, type_, data)
+        value = data.get(name)  # orig pops before converting; peek
+        try:
+            return orig(name, type_, data)
+        except DeebotError:
+            return _UnknownLifeSpan(value)
+
+    tolerant._bugnav_tolerant = True  # type: ignore[attr-defined]
+    command_mod._pop_or_raise = tolerant
+
+
 def install_tolerant_parsers() -> None:
     """Replace the two strict handlers with the tolerant ones."""
     from deebot_client.commands.json.life_span import GetLifeSpan
@@ -98,3 +148,4 @@ def install_tolerant_parsers() -> None:
 
     GetWaterInfo._handle_body_data_dict = classmethod(_tolerant_water_info)
     GetLifeSpan._handle_body_data_list = classmethod(_tolerant_life_span)
+    _install_tolerant_p2p_lifespan()

@@ -86,3 +86,21 @@ class TestLLMJsonMode(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestP2PLifeSpanTolerance(unittest.TestCase):
+    """A mirrored resetLifeSpan naming a consumable newer than the
+    pinned enum (live capture 2026-11-11: 'cleaningSolution') must
+    reconstruct instead of dying in create_from_mqtt."""
+
+    def test_unknown_lifespan_reconstructs(self):
+        from deebot_client.commands.json.life_span import ResetLifeSpan
+
+        cmd = ResetLifeSpan.create_from_mqtt({"type": "cleaningSolution"})
+        self.assertEqual(cmd._args, {"type": "cleaningSolution"})
+
+    def test_known_lifespan_still_real_enum(self):
+        from deebot_client.commands.json.life_span import ResetLifeSpan
+
+        cmd = ResetLifeSpan.create_from_mqtt({"type": "brush"})
+        self.assertEqual(cmd._args, {"type": "brush"})
