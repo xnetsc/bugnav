@@ -17,16 +17,16 @@ class TestSupervisorClock(unittest.TestCase):
     def test_digest_now_uses_config_offset(self):
         w = SessionWatch(SupervisorConfig(enabled=True))
         d = w.digest(0.0, "monitor")  # epoch 0 = 1970-01-01 00:00 UTC
-        self.assertEqual(d["now"], "08:00")  # default offset +8
+        self.assertEqual(d["now"], "08:00（东八区）")  # stated WITH its zone
         self.assertEqual(d["bout_started"], "08:00")
 
     def test_digest_now_honours_custom_offset(self):
         w = SessionWatch(SupervisorConfig(enabled=True,
                                           tz_offset_hours=0.0))
-        self.assertEqual(w.digest(0.0, "monitor")["now"], "00:00")
+        self.assertEqual(w.digest(0.0, "monitor")["now"], "00:00（UTC）")
         w2 = SessionWatch(SupervisorConfig(enabled=True,
                                            tz_offset_hours=-5.0))
-        self.assertEqual(w2.digest(0.0, "monitor")["now"], "19:00")
+        self.assertEqual(w2.digest(0.0, "monitor")["now"], "19:00（西五区）")
 
     def test_adopt_device_tz(self):
         cfg = SupervisorConfig(enabled=True)

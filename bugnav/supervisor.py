@@ -546,6 +546,21 @@ class SessionWatch:
         tz = timezone(timedelta(hours=self.cfg.tz_offset_hours))
         return datetime.fromtimestamp(wall_ts, tz).strftime("%H:%M")
 
+    def _tz_label(self) -> str:
+        """The home zone as a Chinese label （东八区）, for stating
+        the current time AS one fact - 'the time in <zone> is HH:MM' -
+        never a UTC time plus an offset the judge must combine
+        (user 2026-11-11)."""
+        h = self.cfg.tz_offset_hours
+        if h == 0:
+            return "UTC"
+        if float(h).is_integer() and abs(h) <= 14:
+            names = "一二三四五六七八九十"
+            n = int(abs(h))
+            word = names[n - 1] if n <= 10 else "十" + names[n - 11]
+            return f"{'东' if h > 0 else '西'}{word}区"
+        return f"UTC{h:+g}"
+
     def soc_to_guarantee_finish(self, remaining_m2: float,
                                 model: ChargeModel | None = None) -> int:
         """SOC to LEAVE the dock with so the remaining area finishes in
@@ -643,7 +658,7 @@ class SessionWatch:
         if self.cell_entries:
             revisit = round(1.0 - len(self.cells) / self.cell_entries, 2)
         d = {
-            "now": self._hm(wall),
+            "now": f"{self._hm(wall)}（{self._tz_label()}）",
             "bout_started": self._hm(self.bout_start_wall),
             "bout_elapsed_min": round((wall - self.bout_start_wall) / 60, 1),
             "actual_cleaning_min": round(self.bout_cleaning_s / 60, 1),
@@ -780,7 +795,7 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 只输出一个 JSON 对象，不要其他文字：
 {"action": "continue|notify|abandon_current|stop_session|ask_user", "message": "给用户看的一句话（notify/stop_session/ask_user 时必填，简体中文）", "reason": "判断依据，一句话", "resume_charge_pct": 可选整数, "charge_model_update": 可选，见充电参数矫正}
 
-时间纪律（重要）：摘要里所有时间差都已由代码算好为分钟数与比值——已用时长 bout_elapsed_min、剩余 eta_minutes_left、预计总跨度 projected_total_span_min、超出本户常态 span_over_normal_min（正数即已超出）、充电等待 charge_min_from_now 等。判断只用这些现成的分钟数。now / bout_started / eta_finish / ready_at 这些钟点只是标签：需要告诉用户几点时在 message 里原文引用（如把 eta_finish 直接写进去），严禁用钟点做加减、严禁用两个钟点相减推算时长——跨钟点心算必错。时段感受（上午、下午、深夜）只看 now 标签本身，不要再拿它与任何钟点相减。
+时间纪律（重要）：摘要里的钟点全部是机器人所在时区的当地时间，now 已连时区一并标明（如「13:30（东八区）」就是当前当地时间）——摘要里不存在 UTC 时间，你不需要、也不要做任何时区换算。所有时间差都已由代码算好为分钟数与比值——已用时长 bout_elapsed_min、剩余 eta_minutes_left、预计总跨度 projected_total_span_min、超出本户常态 span_over_normal_min（正数即已超出）、充电等待 charge_min_from_now 等。判断只用这些现成的分钟数。now / bout_started / eta_finish / ready_at 这些钟点只是当地时间标签：需要告诉用户几点时在 message 里原文引用（如把 eta_finish 直接写进去），严禁用钟点做加减、严禁用两个钟点相减推算时长——跨钟点心算必错。时段感受（上午、下午、深夜）只看 now 本身，不要再拿它与任何钟点相减。
 
 判断要点：
 - continue：一切正常，或虽慢但合理（大户型、首次建图）。
