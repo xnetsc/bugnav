@@ -22,6 +22,8 @@ Bounded verdict vocabulary (the supervisor can only ever):
   notify          - tell the user something (message included)
   abandon_current - give up on the current obstacle episode only
   stop_session    - stop this cleaning session entirely
+  ask_user        - pause and let the USER choose (button/app);
+                    no feedback within ask_timeout_s = return & end
   + resume_charge_pct while docked: resume at this battery level
     instead of the firmware's fixed threshold.
 It cannot invent destinations or change controller parameters.
@@ -49,6 +51,10 @@ class SupervisorConfig:
     enabled: bool = False
     review_interval_s: float = 1200.0  # ask every ~20 min of cleaning
     session_soft_cap_s: float = 3 * 3600.0  # beyond this, ask sooner
+    # ask_user verdicts: how long to wait for the user's choice
+    # (button press / app action) before the default fires - return
+    # to dock and end (user 2026-11-11: 5 minutes, no feedback).
+    ask_timeout_s: float = 300.0
     episode_trigger: int = 6  # this many episodes also triggers a review
     urgent_repeat_s: float = 300.0  # min gap between cap-triggered reviews
     docked_full_pct: int = 98  # docked at/above this = bout is over
@@ -134,7 +140,7 @@ def candidate_decision(bout_cells: set, cached_cells: set,
 
 @dataclass
 class Verdict:
-    action: str = "continue"  # continue|notify|abandon_current|stop_session
+    action: str = "continue"  # continue|notify|abandon_current|stop_session|ask_user
     message: str = ""
     reason: str = ""
     resume_charge_pct: int | None = None
@@ -686,19 +692,20 @@ class SessionWatch:
 SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清扫的统计摘要（含电量、覆盖/剩余面积估算，以及一个确定性充电规划器给出的建议）。总目标：让「清扫+充电+回站开销」的总耗时最短——早上 7 点的任务不许拖到晚上 8 点。
 
 只输出一个 JSON 对象，不要其他文字：
-{"action": "continue|notify|abandon_current|stop_session", "message": "给用户看的一句话（notify/stop_session 时必填，简体中文）", "reason": "判断依据，一句话", "resume_charge_pct": 可选整数}
+{"action": "continue|notify|abandon_current|stop_session|ask_user", "message": "给用户看的一句话（notify/stop_session/ask_user 时必填，简体中文）", "reason": "判断依据，一句话", "resume_charge_pct": 可选整数}
 
 判断要点：
 - continue：一切正常，或虽慢但合理（大户型、首次建图）。
 - notify：有异常值得用户知道，但还不至于停（如反复清扫同一区域、电量消耗异常）。
 - abandon_current：当前这一个绕障 episode 明显在空转，放弃它、其余继续。
 - stop_session：整个任务已失去意义（反复打扫、长时间无有效进展、剩余无几却要再充一轮电等），直接结束。
+- ask_user：继续还是收尾各有道理、需要用户拍板时用（如总跨度已不可接受但剩余又确实可惜、真因环境复杂扫不完）。系统会暂停机器人（若在桩上则保持停靠），把你的 message 发给用户并等 5 分钟：用户按机身键或在 App 里恢复清扫=继续，让它回站=结束，5 分钟无任何反馈则自动回站结束。message 里要写清现状、预计几点能完、慢在哪里。只用于真正的取舍题，能自己判断的不要甩给用户。
 - 预计完成时间（摘要带 eta_finish / eta_minutes_left 时）：这是按当前滚动推进速度与滚动耗电率推算的完工时刻（含预计充电轮次）。若 eta_finish 明显越界（如下午的任务拖到深夜）、或 eta_charges_left 还很多而剩余面积不大，要认真考虑 stop_session 或至少 notify，不要等软上限到了才反应。
 - 速度异常与总面积无关（任何时候都成立）：pace_stalled=true 表示最近约 15 分钟几乎没有新增覆盖、却一直在「清扫」——这本身就是异常，该 notify 或 stop 就处理，不要因为本场没有剩余面积/ETA（如地图缓存对不上、基准缺席）就跳过判断。反过来，在基准缺席的陌生大户型里，只要推进正常、重扫率低，单纯耗时长不算异常，不要把本户的时长上限硬套上去。
 - 虚拟水量（water_pct_est）：无真实水位传感器，这是按「回站洗拖即补满、其后按喷水档位×拖过面积递减」推算的账面水量。低于约 20% 且短期不会回站时，拖布大概率在干拖，值得 notify 一句。
 - 地图缓存对不上（摘要带 home_based_figures_withheld 时）：本场扫的区域与缓存的全屋面积显著不同——多半是换了地图、换了清扫房间，或把机器人带去了别处。此时摘要已扣下剩余面积/覆盖率/预计完成时间，不要拿它们做判断，按已扫时长、推进速度、重扫率照常判断即可；这件事本身值得 notify 用户一句。缓存基准会在新布局连续出现两场后自动重建，不用管。
 - 充电裁决（机器人回站充电中、摘要带 deterministic_charge_plan 时）：这就是「要不要再放它出去续扫」的决策点，每一次都要重新判断，不默认放行。先过合理性这一关（见下面单场时长与作息），不合理就 stop_session；合理时默认认可规划器的 resume_soc，只有明确理由（如剩余面积小到不值得再充）才用 resume_charge_pct 覆盖。若剩余面积为 0 或极小，优先 stop_session 而不是再充再扫。
-- 短周期反复充电（摘要 short_cycle_thrashing=true 时）：充完回来扫没多久又没电、已经反复多轮——这说明续扫电量或耗电估计根本没处理好。系统已自动把本轮续扫电量下限抬到 95%，不要再按原规划放行。结合 charge_segments 诊断：每轮出发电量（start_batt）不高，是充得太少；出发电量已高却很快耗尽（end_batt 很快见底），是耗电异常，值得 notify 用户。若已反复多轮、剩余又不多，直接 stop_session 收尾。
+- 短周期反复充电（摘要 short_cycle_thrashing=true 时）：充完回来扫没多久又没电、已经反复多轮——这说明续扫电量或耗电估计根本没处理好，处置由你裁决（系统不自动改电量）。结合 charge_segments 诊断：每轮出发电量（start_batt）不高，是充得太少——可以抬高 resume_charge_pct 让它一次充够再放行；出发电量已高却很快耗尽（end_batt 很快见底），是耗电异常，值得 notify 用户；若已反复多轮、剩余又不多，直接 stop_session 收尾。
 - 剩余不多、却必须充电时（如还剩约 10% 面积、电量实在撑不到扫完）：这一轮充电的目标不是省时间，而是「确保足够一次扫完」。摘要的 resume_soc_to_guarantee_finish 是按当前耗电估算加安全系数算出的、足够一次扫完剩余的出发电量：裁决 resume_charge_pct 时不要低于它，没充到这个数之前不要放行续扫——为省几分钟充电去赌一把、不够再回一趟，是最亏的走法。反之剩余很多时不必死守这个数，按总耗时最优权衡。
 - 充电等待也是成本（摘要 charge_options 给每个候选续扫电量标了「还要等多久、几点能走（ready_at）、能换多少面积」）：若充到高电量（如 80%）意味着要等三四个小时，那不可接受——哪怕它名义上能保证扫完。宁可选低一档（如 50%）先扫出一个可接受的面积、把主体扫完就收尾，零头留到下次。这条与上一条「保证数」一起看：保证数低、等待短，就按保证数；保证数高到要等数小时，就降档求可接受面积，不要为最后一点面积把全天耗在充电等待上。记住底线是整场总跨度（摘要 projected_total_span_min）：已花的时间、充电等待、剩余清扫是一个整体——这个总和被撑到不可接受的程度（如跨大半天、顶进深夜），就必须降档或收尾。这条优先于一切比率判断：即使 projected_vs_expected_ratio 完全正常、速度与面积相称、慢得「有道理」，只要预计总跨度本身已不可接受，照样收尾——复杂度可以解释速度慢，解释不了无限长；不管什么速度，总清扫时间不许被撑到无法接受。
 - 时段锚点：上午发起的任务，拖到下午四五点还在续扫、且 projected_vs_expected_ratio 显示已明显超出与面积相称的预期（或剩余极少却还要再充一轮），是强收尾信号，stop_session；若比率正常、纯粹面积大且推进稳，不算异常。无论如何不要让它无必要地跨过晚间居家时段继续耗。
@@ -722,7 +729,8 @@ def build_messages(digest: dict) -> list[dict]:
     ]
 
 
-_ACTIONS = {"continue", "notify", "abandon_current", "stop_session"}
+_ACTIONS = {"continue", "notify", "abandon_current", "stop_session",
+            "ask_user"}
 
 
 def parse_verdict(text: str) -> Verdict:

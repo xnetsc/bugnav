@@ -17,6 +17,7 @@ from bugnav.supervisor import (
     SessionWatch,
     SupervisorConfig,
     home_consistency,
+    parse_verdict,
 )
 
 
@@ -406,6 +407,17 @@ class TestComplexityAccounting(unittest.TestCase):
         self.assertIn("解释不了无限长", SYSTEM)
         self.assertIn("扫不完", SYSTEM)
         self.assertIn("必须用 notify", SYSTEM)
+
+    def test_ask_user_verdict_and_timeout_default(self):
+        # User (2026-11-11): when the supervisor hands the choice to
+        # the user, 5 minutes without feedback = return & end.
+        v = parse_verdict('{"action": "ask_user", "message": "还扫吗"}')
+        self.assertEqual(v.action, "ask_user")
+        self.assertEqual(SupervisorConfig().ask_timeout_s, 300.0)
+        self.assertIn("ask_user", SYSTEM)
+        self.assertIn("5 分钟无任何反馈则自动回站结束", SYSTEM)
+        # The stale claim of an automatic 95% floor must stay out.
+        self.assertNotIn("下限抬到 95%", SYSTEM)
 
     def test_no_hardcoded_thrash_floor(self):
         # User (2026-11-11): conclusions belong to the AI, not code -

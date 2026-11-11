@@ -133,6 +133,9 @@ async def _main_async(cfg_path: str, mode: str) -> None:
         "review_task": None,
         "charge_target": None,  # resume at this battery % (one-shot)
         "session_stopped": False,
+        "awaiting_until": None,   # ask_user: monotonic deadline
+        "awaiting_since": 0.0,
+        "awaiting_from": None,    # robot state when the ask began
         "last_home_save": 0.0,
         "bout_was_open": False,
     }
@@ -245,6 +248,26 @@ async def _main_async(cfg_path: str, mode: str) -> None:
             f"reason={verdict.reason!r} resume_pct={verdict.resume_charge_pct}")
         if verdict.action == "notify" and verdict.message:
             log(f"NOTIFY: supervisor: {verdict.message}")
+        elif (verdict.action == "ask_user"
+                and sample.state != RobotState.RETURNING):
+            # Hand the decision to the user (user 2026-11-11): pause,
+            # notify with the choices, and wait ask_timeout_s.  The
+            # user's own hand resolves it - resume (button/app) means
+            # continue, sending it home means end; NO feedback within
+            # the window defaults to return-to-dock and end.
+            mins = max(1, round(sup_cfg.ask_timeout_s / 60))
+            log(f"NOTIFY: 需要您决定：{verdict.message or verdict.reason}"
+                f"（{mins} 分钟内按机身键或在 App 里恢复清扫=继续；"
+                f"让它回站=结束；无反馈将自动回站结束）")
+            state["awaiting_until"] = (time.monotonic()
+                                       + sup_cfg.ask_timeout_s)
+            state["awaiting_since"] = time.monotonic()
+            state["awaiting_from"] = sample.state
+            state["charge_target"] = None
+            if mode == "active" and sample.state == RobotState.CLEANING:
+                await dispatch([Command(CommandKind.PAUSE)])
+            elif mode != "active":
+                log("[observe] supervisor would pause and ask the user")
         elif verdict.action == "abandon_current":
             if mode == "active":
                 await dispatch(controller.force_abandon(sample))
@@ -343,6 +366,7 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                         service_consult(req))
                 # session supervisor servicing
                 if (supervisor_on and not state["session_stopped"]
+                        and state["awaiting_until"] is None
                         and watch.due()
                         and (state["review_task"] is None
                              or state["review_task"].done())):
@@ -365,6 +389,41 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                                 [Command(CommandKind.RESUME_AUTO)])
                         else:
                             log("[observe] would resume clean now")
+                # ask_user resolution: the user's own hand on the
+                # robot (or in the app) is the answer; silence for
+                # ask_timeout_s defaults to return-and-end (user
+                # 2026-11-11: 5 minutes, no feedback -> 回站结束).
+                if state["awaiting_until"] is not None:
+                    waited = time.monotonic() - state["awaiting_since"]
+                    frm = state["awaiting_from"]
+                    user_continue = (
+                        sample.state == RobotState.CLEANING
+                        and (frm != RobotState.CLEANING or waited > 8))
+                    user_end = (
+                        waited > 8 and frm != RobotState.DOCKED
+                        and sample.state != frm
+                        and sample.state in (RobotState.RETURNING,
+                                             RobotState.IDLE,
+                                             RobotState.DOCKED))
+                    if user_continue:
+                        state["awaiting_until"] = None
+                        log("user choice: resumed during the ask "
+                            "window -> continue cleaning")
+                    elif user_end:
+                        state["awaiting_until"] = None
+                        state["session_stopped"] = True
+                        log("user choice: sent home during the ask "
+                            "window -> end session")
+                    elif time.monotonic() > state["awaiting_until"]:
+                        state["awaiting_until"] = None
+                        state["session_stopped"] = True
+                        state["charge_target"] = None
+                        log("NOTIFY: 等待选择超时（5 分钟无反馈），"
+                            "已按默认回站结束本场清扫")
+                        if mode == "active" and frm != RobotState.DOCKED:
+                            await dispatch(
+                                [Command(CommandKind.STOP),
+                                 Command(CommandKind.RETURN_TO_DOCK)])
         await asyncio.sleep(0.5)
 
 
