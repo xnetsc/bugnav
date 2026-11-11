@@ -262,7 +262,8 @@ class TestGuaranteeSoc(unittest.TestCase):
         # stop signal.  These are judgment logic for the LLM, fed with
         # computed figures - not hardcoded rules.
         self.assertIn("resume_soc_to_guarantee_finish", SYSTEM)
-        self.assertIn("保证", SYSTEM)
+        self.assertIn("确保足够一次扫完", SYSTEM)
+        self.assertIn("没充到这个数之前不要放行续扫", SYSTEM)
         self.assertIn("四五点", SYSTEM)
         self.assertIn("不是死规则", SYSTEM)
 
