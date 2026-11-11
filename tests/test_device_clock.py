@@ -69,3 +69,22 @@ class TestDeviceNow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDeviceNowAt(unittest.TestCase):
+    def _adapter(self):
+        adapter = DeebotAdapter(AdapterConfig(account_id="x"))
+        adapter._device_clock = (1_000.0, 500.0)  # (epoch, mono)
+        return adapter
+
+    def test_projects_backwards_and_forwards(self):
+        a = self._adapter()
+        self.assertEqual(a.device_now_at(500.0), 1_000.0)
+        # An instant BEFORE the capture (a buffered startup line)
+        # still lands on the robot's timeline.
+        self.assertEqual(a.device_now_at(400.0), 900.0)
+        self.assertEqual(a.device_now_at(650.0), 1_150.0)
+
+    def test_no_basis(self):
+        adapter = DeebotAdapter(AdapterConfig(account_id="x"))
+        self.assertIsNone(adapter.device_now_at(1.0))

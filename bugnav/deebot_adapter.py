@@ -352,6 +352,17 @@ class DeebotAdapter:
         epoch0, mono0 = self._device_clock
         return epoch0 + (time.monotonic() - mono0)
 
+    def device_now_at(self, mono_ts: float) -> float | None:
+        """The robot-clock epoch at ANY monotonic instant of this
+        process - including instants BEFORE the basis was captured:
+        the (epoch, monotonic) pair defines the whole timeline, so
+        startup lines logged before the first header landed can
+        still be stamped on the robot's clock once it exists."""
+        if self._device_clock is None:
+            return None
+        epoch0, mono0 = self._device_clock
+        return epoch0 + (mono_ts - mono0)
+
     def request_refresh(self) -> None:
         if self._device is not None:
             self._device.events.request_refresh(self._PositionsEvent)

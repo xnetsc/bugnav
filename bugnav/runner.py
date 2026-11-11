@@ -34,6 +34,20 @@ def _load_json(path: str) -> dict:
         return json.load(f)
 
 
+def _posix_tz(offset_hours: float) -> str:
+    """A POSIX TZ string for a UTC offset (e.g. +8 -> 'LOC-8'):
+    the POSIX value is what you ADD to local time to get UTC, the
+    negation of the usual offset.  Built from the robot-reported
+    offset at runtime - no zone is hardcoded anywhere (user
+    2026-11-11: 容器启动时自动探测时区，不要写死)."""
+    total_min = int(round(-offset_hours * 60))
+    sign = "-" if total_min < 0 else "+"
+    hh, mm = divmod(abs(total_min), 60)
+    if mm == 0:
+        return f"LOC{sign}{hh}" if total_min else "LOC0"
+    return f"LOC{sign}{hh}:{mm:02d}"
+
+
 def log_stamp(device_epoch: float | None,
               tz_offset_hours: float) -> str | None:
     """HH:MM:SS for a log line, rendered from the COMPUTED time -
@@ -78,13 +92,18 @@ async def _main_async(cfg_path: str, mode: str) -> None:
     webhook = raw.get("notify_webhook", "")
     log_path = os.path.join(data_dir, "events.jsonl")
 
-    def log(msg: str) -> None:
-        dn = adapter.device_now()
-        stamp = log_stamp(dn, sup_cfg.tz_offset_hours)
-        if stamp is None:  # no device header captured yet (startup)
-            stamp, epoch = time.strftime("%H:%M:%S"), time.time()
-        else:
-            epoch = dn
+    # Lines logged before the robot clock lands are BUFFERED with
+    # their monotonic instant and stamped retroactively on the
+    # robot's timeline once the basis exists (device_now_at projects
+    # backwards) - so no zone needs to be preset anywhere for the
+    # startup lines to come out in household time either (user
+    # 2026-11-11: 自动探测、不要写死).  If no header ever arrives
+    # (connect failure), the buffer flushes with the container-local
+    # fallback instead of being lost.
+    pending_stamps: list[tuple[float, str]] = []
+    clock_settled = {"done": False}
+
+    def _emit(stamp: str, epoch: float, msg: str) -> None:
         line = f"[{stamp}] {msg}"
         print(line, flush=True)
         with open(log_path, "a", encoding="utf-8") as f:
@@ -99,6 +118,34 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                 urllib.request.urlopen(req, timeout=5)
             except Exception:
                 pass
+
+    def _flush_pending_fallback() -> None:
+        stamp, epoch = time.strftime("%H:%M:%S"), time.time()
+        for _, old in pending_stamps:
+            _emit(stamp, epoch, old)
+        pending_stamps.clear()
+
+    def log(msg: str) -> None:
+        dn = adapter.device_now()
+        if pending_stamps and dn is not None:
+            hours = (adapter.device_tz_offset_hours
+                     if adapter.device_tz_offset_hours is not None
+                     else sup_cfg.tz_offset_hours)
+            for t_mono, old in pending_stamps:
+                e = adapter.device_now_at(t_mono)
+                _emit(log_stamp(e, hours), e, old)
+            pending_stamps.clear()
+        if dn is not None:
+            _emit(log_stamp(dn, sup_cfg.tz_offset_hours), dn, msg)
+        elif not clock_settled["done"] and len(pending_stamps) < 50:
+            pending_stamps.append((time.monotonic(), msg))
+        else:
+            # No robot clock: the fallback is the container's
+            # local time (itself adopted from the robot after a
+            # successful connect - see the startup block).
+            if pending_stamps:
+                _flush_pending_fallback()
+            _emit(time.strftime("%H:%M:%S"), time.time(), msg)
 
     # ---- LLM layers (strategist + supervisor). Both are inert unless
     # their config flag is on AND an LLM key is present in the env.
@@ -371,7 +418,12 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                 log(f"charge plan: resume at {target}% "
                     f"(plan={plan}, verdict_override={verdict.resume_charge_pct})")
 
-    await adapter.connect(log)
+    try:
+        await adapter.connect(log)
+    finally:
+        clock_settled["done"] = True
+        if pending_stamps and adapter.device_now() is None:
+            _flush_pending_fallback()
 
     def _wall() -> float:
         """Wall clock for everything the AI (or the user, via a
@@ -388,6 +440,14 @@ async def _main_async(cfg_path: str, mode: str) -> None:
             config_had_key="tz_offset_hours" in raw.get("supervisor", {}),
             device_hours=adapter.device_tz_offset_hours):
         log(f"supervisor clock follows the robot: UTC"
+            f"{sup_cfg.tz_offset_hours:+g}")
+    # The container's own local time adopts the same zone, so no TZ
+    # needs to be preset in the deployment at all: from here on,
+    # even the local-time fallback speaks the robot's zone.
+    if hasattr(time, "tzset"):
+        os.environ["TZ"] = _posix_tz(sup_cfg.tz_offset_hours)
+        time.tzset()
+        log(f"container local time adopted from the robot: UTC"
             f"{sup_cfg.tz_offset_hours:+g}")
     log(f"runner started in mode={mode}, poll={poll_s}s, "
         f"advisor={'on' if advisor_on else 'off'}, "

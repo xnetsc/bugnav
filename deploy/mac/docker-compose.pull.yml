@@ -4,9 +4,9 @@ services:
     container_name: bugnav
     restart: unless-stopped
     environment:
-      # Log timestamps in China time (POSIX form: CST-8 == UTC+8,
-      # works without a tzdata database in the slim image).
-      TZ: "CST-8"
+      # No TZ here on purpose: the container adopts the robot's
+      # own reported timezone at startup; log stamps and the
+      # local-time fallback follow it.  Nothing is hardcoded.
       ECOVACS_ACCOUNT_ID: "${ECOVACS_ACCOUNT_ID:?set ECOVACS_ACCOUNT_ID in .env}"
       ECOVACS_PASSWORD: "${ECOVACS_PASSWORD:?set ECOVACS_PASSWORD in .env}"
       # Optional: LLM-assisted offline analysis (tools/analyze_episodes.py).

@@ -21,3 +21,12 @@ class TestLogStamp(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPosixTz(unittest.TestCase):
+    def test_built_from_offset_not_hardcoded(self):
+        from bugnav.runner import _posix_tz
+        self.assertEqual(_posix_tz(8.0), "LOC-8")    # UTC+8
+        self.assertEqual(_posix_tz(-5.0), "LOC+5")   # UTC-5
+        self.assertEqual(_posix_tz(0.0), "LOC0")
+        self.assertEqual(_posix_tz(5.5), "LOC-5:30")  # fractional
