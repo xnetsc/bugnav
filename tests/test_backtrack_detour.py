@@ -91,6 +91,11 @@ class TestBacktrackDetour(unittest.TestCase):
             Sample(t=10.0, pos=Point(0.0, 0.0), state=RobotState.PAUSED))
         self.assertIn(CommandKind.PAUSE, _kinds(cmds))
         self.assertNotIn(CommandKind.RESUME_AUTO, _kinds(cmds))
+        # The robot itself must sound the alarm too, not only the
+        # program's notification (user 2026-11-11).
+        sounds = [c for c in cmds if c.kind == CommandKind.PLAY_SOUND]
+        self.assertEqual(len(sounds), 1)
+        self.assertEqual(sounds[0].count, 3)
         notes = [c.message for c in cmds if c.kind == CommandKind.NOTIFY]
         self.assertTrue(any("TRAPPED" in n for n in notes), notes)
         self.assertIsNotNone(ctl._trapped_pos)

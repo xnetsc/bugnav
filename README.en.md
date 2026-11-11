@@ -55,9 +55,11 @@ operations → verification checklist → rollback), in Chinese:
   success — it does not have to regain the exact previous waypoint.
   Only when that exploration has circled completely and can neither
   regain the exit nor leave the area at all is the robot declared
-  **trapped**: it stops and raises an alarm for a human rescue, and
-  stays hands-off until a person visibly intervenes (robot moved by
-  hand, or back at the dock).
+  **trapped**: it stops and raises the alarm for a human rescue —
+  the notification goes to phone/Mac *and the robot itself sounds
+  its built-in alert tone three times*, so someone at home hears it
+  without looking at a phone — and stays hands-off until a person
+  visibly intervenes (robot moved by hand, or back at the dock).
 - **Looping/loitering detection**: circling inside a small disc
   (long path, large cumulative turn, small net displacement) triggers
   takeover into wall-following on first occurrence, before it turns
@@ -283,8 +285,8 @@ three-scenario end-to-end tests), `Dockerfile`, `docker-compose.yml`.
   pull and restart: whether `getWorkState` is accepted by the
   firmware (the state-stream fix), whether the water-info
   subscription is accepted, coordinate scale calibration (3 m
-  two-point method) and sub-metre area commands, the full active
-  mode chain.
+  two-point method) and sub-metre area commands, the playSound
+  alert tone, the full active mode chain.
 - Known ceilings: no custom voice/intercom exists in the protocol
   (built-in sounds only); the camera feed runs over a vendor-only
   session an external program cannot join; dirt detection is

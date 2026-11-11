@@ -35,6 +35,7 @@ class CommandKind(str, Enum):
     RESUME_AUTO = "resume_auto"
     CLEAN_AREA = "clean_area"  # go clean a small rect around `point`
     RETURN_TO_DOCK = "return_to_dock"  # head back to the station now
+    PLAY_SOUND = "play_sound"  # the robot's OWN built-in alert sound
     NOTIFY = "notify"
 
 
@@ -44,6 +45,7 @@ class Command:
     point: Point | None = None  # centre for CLEAN_AREA
     rect_half_m: float = 0.30  # half side length of the CLEAN_AREA rect
     message: str = ""
+    count: int = 1  # repetitions (PLAY_SOUND)
 
 
 @dataclass

@@ -25,6 +25,7 @@ variable only - never from the config file, never logged.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import time
@@ -323,5 +324,18 @@ class DeebotAdapter:
                 cls(CleanMode.CUSTOM_AREA, rect, 1)
             )
             log(f"sent CUSTOM_AREA rect={rect}")
+        elif cmd.kind == CommandKind.PLAY_SOUND:
+            from deebot_client.commands.json import PlaySound
+
+            # PlaySound is the robot's built-in locate/alert tone
+            # (sid 30, the only sound deebot-client addresses; the
+            # firmware offers no custom voice - see README).  Repeat
+            # with pauses so it registers as an alarm, not a blip.
+            n = max(1, cmd.count)
+            for i in range(n):
+                await self._device.execute_command(PlaySound())
+                if i + 1 < n:
+                    await asyncio.sleep(1.5)
+            log(f"played robot alert sound x{n}")
         elif cmd.kind == CommandKind.NOTIFY:
             log(f"NOTIFY: {cmd.message}")

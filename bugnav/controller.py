@@ -92,6 +92,10 @@ class ControllerConfig:
     # progress toward it counts as BLOCKED (something moved into the
     # entry corridor), not as "close enough, move on".
     backtrack_min_progress_m: float = 0.12
+    # When trapped is declared, the ROBOT ITSELF must also raise the
+    # alarm (user 2026-11-11) - its built-in sound, this many times -
+    # not only the program's phone/Mac notification.
+    trapped_sound_count: int = 3
     # Full circle on an obstacle this small = success (its perimeter is
     # then fully cleaned). Contact points sit one robot-clearance away
     # from the physical object, so a chair leg's cluster measures up to
@@ -802,6 +806,10 @@ class BugNavController:
         self._detour_goal = None
         cmds = [
             Command(CommandKind.PAUSE),
+            # The alarm comes from the robot itself too, so someone
+            # at home hears it even without looking at a phone.
+            Command(CommandKind.PLAY_SOUND,
+                    count=self.cfg.trapped_sound_count),
             Command(
                 CommandKind.NOTIFY,
                 message=(f"TRAPPED: no way out of this area ({why}); "
