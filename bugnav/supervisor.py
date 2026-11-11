@@ -37,6 +37,7 @@ import math
 import re
 import time
 from collections import Counter, deque
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 
 from .chargeplan import MARGIN, ChargeModel, expected_total_minutes
@@ -55,6 +56,13 @@ class SupervisorConfig:
     # (button press / app action) before the default fires - return
     # to dock and end (user 2026-11-11: 5 minutes, no feedback).
     ask_timeout_s: float = 300.0
+    # Home timezone as a fixed UTC offset.  Every clock string fed to
+    # the supervisor LLM (now / bout_started / eta_finish / ready_at)
+    # is rendered with THIS offset, never the process-local clock:
+    # the container may run on UTC, and on 2026-11-11 that made the
+    # judge read 11:01 local as "03:00, deep night" and stop a
+    # morning session.  This household is UTC+8.
+    tz_offset_hours: float = 8.0
     episode_trigger: int = 6  # this many episodes also triggers a review
     urgent_repeat_s: float = 300.0  # min gap between cap-triggered reviews
     docked_full_pct: int = 98  # docked at/above this = bout is over
@@ -516,6 +524,15 @@ class SessionWatch:
                 or (model.drain_pct_per_m2 if model is not None
                     else ChargeModel().drain_pct_per_m2))
 
+    def _hm(self, wall_ts: float) -> str:
+        """HH:MM in the home timezone (cfg.tz_offset_hours).
+
+        Deliberately NOT time.localtime: the process clock's zone is
+        an accident of the deployment environment, while the judge's
+        sense of 'what time it is' must always be the household's."""
+        tz = timezone(timedelta(hours=self.cfg.tz_offset_hours))
+        return datetime.fromtimestamp(wall_ts, tz).strftime("%H:%M")
+
     def soc_to_guarantee_finish(self, remaining_m2: float,
                                 model: ChargeModel | None = None) -> int:
         """SOC to LEAVE the dock with so the remaining area finishes in
@@ -548,8 +565,7 @@ class SessionWatch:
             out.append({
                 "resume_soc": level,
                 "charge_min_from_now": round(mins, 1),
-                "ready_at": time.strftime(
-                    "%H:%M", time.localtime(wall + mins * 60)),
+                "ready_at": self._hm(wall + mins * 60),
                 "buys_m2": round(max(
                     0.0, (level - self.cfg.eta_reserve_pct) / drain), 1),
             })
@@ -565,8 +581,7 @@ class SessionWatch:
         remaining = max(0, home_cells - len(self.cells)) * CELL_AREA_M2
         if remaining <= 0:
             return {"eta_minutes_left": 0.0,
-                    "eta_finish": time.strftime(
-                        "%H:%M", time.localtime(wall)),
+                    "eta_finish": self._hm(wall),
                     "eta_charges_left": 0}
         progress = self.rolling_progress_m2_per_min()
         if progress is None and self.bout_cleaning_s >= 300:
@@ -597,8 +612,7 @@ class SessionWatch:
             # must not stretch THIS number past acceptability.
             "projected_total_span_min": round(
                 (wall - self.bout_start_wall) / 60 + total, 1),
-            "eta_finish": time.strftime(
-                "%H:%M", time.localtime(wall + total * 60)),
+            "eta_finish": self._hm(wall + total * 60),
             "eta_charges_left": charges,
             "eta_assumes_progress_m2_per_min": progress,
             "eta_assumes_drain_pct_per_m2": drain,
@@ -616,9 +630,8 @@ class SessionWatch:
         if self.cell_entries:
             revisit = round(1.0 - len(self.cells) / self.cell_entries, 2)
         d = {
-            "now": time.strftime("%H:%M", time.localtime(wall)),
-            "bout_started": time.strftime(
-                "%H:%M", time.localtime(self.bout_start_wall)),
+            "now": self._hm(wall),
+            "bout_started": self._hm(self.bout_start_wall),
             "bout_elapsed_min": round((wall - self.bout_start_wall) / 60, 1),
             "actual_cleaning_min": round(self.bout_cleaning_s / 60, 1),
             "distance_m": round(self.distance_m, 1),
