@@ -20,11 +20,11 @@ about where it started.
 
 Calibration note (real 2026-11-11 session trace): this pattern also
 occurs during the firmware's normal intensive local cleaning, roughly
-ten times per hour-long session.  A single loiter is therefore only an
-observation - the controller escalates to a takeover only when the
-robot comes back and loiters at the *same* spot again in the same
-session (see controller.perimeter_escalations_required).  The chair
-spot was exactly such a repeat (three loiters in one session).
+ten times per hour-long session, at about seven distinct spots.  Per
+the user's settled model that does not gate anything: an obstacle
+encounter goes straight into the along-edge logic in every scenario,
+so the controller takes over on the first loiter at a spot (and only
+once per spot per session - the episode's outcome then stands).
 """
 
 from __future__ import annotations

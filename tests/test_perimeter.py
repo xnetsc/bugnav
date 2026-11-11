@@ -1,8 +1,12 @@
 """Perimeter-loiter trigger: the firmware circles an obstacle and
 passes its opening by (live case: U-shaped chair base, 2026-11-11).
 
-First loiter at a spot = observation only.  A repeat loiter at the same
-spot in the same session = takeover, goal = centre of the circled area.
+User-settled model: no waiting for circling to repeat - an obstacle
+encounter goes straight into the along-edge logic, goal = centre of
+the circled area (where there is a gap, dive in).  Once per spot per
+session via this trigger; the route in is remembered (breadcrumb
+trail survives episode boundaries) so a robot stuck inside the pocket
+can leave by reversing its entry route.
 """
 
 import math
@@ -96,40 +100,60 @@ class TestPerimeterEscalation(unittest.TestCase):
             cmds.extend(ctl.tick(s))
         return cmds
 
-    def test_first_loiter_observes_second_takes_over(self):
+    def test_first_loiter_takes_over_immediately(self):
+        ctl = BugNavController()
+        centre = Point(0.0, 0.0)
+        cmds = self._run(ctl, circle_samples(centre, 0.0))
+        notes = [c for c in cmds if c.kind == CommandKind.NOTIFY]
+        self.assertTrue(any("perimeter loiter" in c.message for c in notes), notes)
+        self.assertTrue(any(c.kind == CommandKind.PAUSE for c in cmds), cmds)
+        self.assertNotEqual(ctl.phase, Phase.MONITOR)
+        # Goal is the centre of the circled area: the pocket.
+        self.assertIsNotNone(ctl._goal)
+        self.assertLess(ctl._goal.distance_to(centre), 0.35, f"goal={ctl._goal}")
+
+    def test_same_spot_not_retaken_via_perimeter_trigger(self):
         ctl = BugNavController()
         centre = Point(0.0, 0.0)
         first = circle_samples(centre, 0.0)
-        cmds = self._run(ctl, first)
-        notes = [c for c in cmds if c.kind == CommandKind.NOTIFY]
-        self.assertTrue(any("perimeter loiter #1" in c.message for c in notes), notes)
-        self.assertFalse(any(c.kind == CommandKind.PAUSE for c in cmds))
-        self.assertEqual(ctl.phase, Phase.MONITOR)
-
+        self._run(ctl, first)
+        self.assertNotEqual(ctl.phase, Phase.MONITOR)
+        # Episode ends (however it ends); the trail is unfrozen.
+        ctl._end_episode(first[-1])
+        ctl.phase = Phase.MONITOR
         away = straight_samples(first[-1].pos, 0.0, first[-1].t + 2.5, n=8)
         self._run(ctl, away)
         back = straight_samples(away[-1].pos, 180.0, away[-1].t + 2.5, n=15)
         self._run(ctl, back)
-        self.assertEqual(ctl.phase, Phase.MONITOR)
-
         second = circle_samples(centre, back[-1].t + 2.5)
         cmds = self._run(ctl, second)
+        self.assertFalse(any(c.kind == CommandKind.PAUSE for c in cmds), cmds)
+        self.assertEqual(ctl.phase, Phase.MONITOR)
+
+    def test_loiter_at_new_spot_also_takes_over(self):
+        ctl = BugNavController()
+        cmds = self._run(ctl, circle_samples(Point(4.0, 4.0), 0.0))
         self.assertTrue(any(c.kind == CommandKind.PAUSE for c in cmds), cmds)
         self.assertNotEqual(ctl.phase, Phase.MONITOR)
-        self.assertIsNotNone(ctl._goal)
-        self.assertLess(ctl._goal.distance_to(centre), 0.35, f"goal={ctl._goal}")
+        self.assertLess(ctl._goal.distance_to(Point(4.0, 4.0)), 0.35)
 
-    def test_loiter_at_new_spot_counts_separately(self):
-        ctl = BugNavController()
-        first = circle_samples(Point(0.0, 0.0), 0.0)
-        self._run(ctl, first)
-        away = straight_samples(first[-1].pos, 45.0, first[-1].t + 2.5, n=10)
-        self._run(ctl, away)
-        other = circle_samples(Point(4.0, 4.0), away[-1].t + 2.5)
-        cmds = self._run(ctl, other)
-        notes = [c for c in cmds if c.kind == CommandKind.NOTIFY]
-        self.assertTrue(any("perimeter loiter #1" in c.message for c in notes), notes)
-        self.assertEqual(ctl.phase, Phase.MONITOR)
+
+class TestEntryRouteRemembered(unittest.TestCase):
+    def test_trail_survives_episode_boundary(self):
+        """Dive in through a gap, get stuck inside: the reversed entry
+        route must still be there for the next episode's backtrack."""
+        from bugnav.trail import BreadcrumbTrail
+
+        trail = BreadcrumbTrail(max_length_m=12.0, min_spacing_m=0.05)
+        for i in range(21):  # approach corridor, 2 m along +x
+            trail.record(Sample(t=float(i), pos=Point(i * 0.1, 0.0)))
+        trail.freeze()
+        trail.unfreeze()  # episode boundary (e.g. entered the pocket)
+        self.assertEqual(trail.points[0], Point(0.0, 0.0))
+        self.assertEqual(trail.points[-1], Point(2.0, 0.0))
+        wps = trail.reversed_waypoints(spacing_m=0.45)
+        self.assertEqual(wps[0], Point(2.0, 0.0))
+        self.assertEqual(wps[-1], Point(0.0, 0.0))
 
 
 if __name__ == "__main__":

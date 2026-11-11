@@ -53,8 +53,16 @@ class BreadcrumbTrail:
         return self._frozen[0]
 
     def unfreeze(self) -> None:
+        """Resume recording, KEEPING the points gathered so far.
+
+        The entry corridor must survive an episode boundary: if the
+        robot dived through a gap into a pocket and gets stuck inside
+        it later, the way out is the reversed route it came in by -
+        which lives in these points.  They still scroll out under the
+        rolling length budget, so a much later, unrelated episode is
+        not anchored to a stale corridor.
+        """
         self._frozen = None
-        self._points = []
 
     def reversed_waypoints(self, spacing_m: float = 0.45) -> list[Point]:
         """Entry path in reverse, thinned to roughly `spacing_m` steps.

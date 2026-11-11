@@ -20,13 +20,15 @@ Strategy (settled with the user):
     the breadcrumb trail in reverse (every exit waypoint was actually
     traversed on the way in), blacklist the spot for this session only,
     and resume.
-  * Second trigger, no struggle needed: if the firmware itself keeps
+  * Second trigger, no struggle needed: if the firmware itself is
     circling one spot and passing its opening by (perimeter loiter,
-    seen live 2026-11-11 at a U-shaped chair base), the second loiter
-    at the same spot in one session starts an episode whose goal is
-    the centre of the circled area - the pocket it never enters.  The
-    staging-ring exploration then tries that goal from successive
-    angles; the opening face is one of them.
+    seen live 2026-11-11 at a U-shaped chair base), that encounter
+    starts an episode right away whose goal is the centre of the
+    circled area - the pocket it never enters.  The staging-ring
+    exploration then tries that goal from successive angles; where
+    there is a gap, that angle dives in.  The route in is the frozen
+    breadcrumb trail, and if the robot cannot get out again it leaves
+    by replaying that trail in reverse.
 """
 
 from __future__ import annotations
@@ -96,11 +98,12 @@ class ControllerConfig:
     backtrack_spacing_m: float = 0.45
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     perimeter: PerimeterConfig = field(default_factory=PerimeterConfig)
-    # A single perimeter loiter is common in the firmware's normal
-    # intensive cleaning, so it is only logged.  The robot coming back
-    # and loitering at the same spot again in the same session is the
-    # takeover signal (it circled the opening and passed it by, twice).
-    perimeter_escalations_required: int = 2
+    # User-settled model (2026-11-11): no waiting for the firmware to
+    # circle first - an obstacle encounter goes straight into the
+    # along-edge logic, in every scenario; where there is a gap, dive
+    # in.  A spot already taken over via this trigger is not taken over
+    # again this session (the episode's own outcome - entered, or
+    # abandoned and session-blacklisted - stands).
     perimeter_repeat_radius_m: float = 0.6
     # LLM strategy advisor (see strategist.py). When enabled AND the
     # runner has an LLM configured, the fixed strategy consults the
@@ -121,10 +124,9 @@ class BugNavController:
         self.cfg = config or ControllerConfig()
         self.detector = StruggleDetector(self.cfg.detector)
         self.perimeter = PerimeterDetector(self.cfg.perimeter)
-        # Perimeter-loiter bookkeeping for this session only (a chair
-        # moves; nothing here may outlive the session as a ban).
-        self._perimeter_visits: list[tuple[Point, int]] = []  # (centre, count)
-        self._perimeter_handled: list[Point] = []  # centres already taken over
+        # Centres already taken over via the perimeter trigger this
+        # session (a chair moves; nothing here outlives the session).
+        self._perimeter_handled: list[Point] = []
         self.trail = BreadcrumbTrail()
         self.clusters = ClusterManager()
         self.phase = Phase.MONITOR
@@ -240,30 +242,11 @@ class BugNavController:
             for c in self._perimeter_handled
         ):
             return []  # already took this spot over once this session
-        count = 1
-        for i, (c, n) in enumerate(self._perimeter_visits):
-            if centre.distance_to(c) <= self.cfg.perimeter_repeat_radius_m:
-                count = n + 1
-                self._perimeter_visits[i] = (c, count)
-                centre = c
-                break
-        else:
-            self._perimeter_visits.append((centre, 1))
-        if count < self.cfg.perimeter_escalations_required:
-            return [
-                Command(
-                    CommandKind.NOTIFY,
-                    message=(
-                        f"perimeter loiter #{count} at {centre} "
-                        f"(path {event.path_m:.1f} m, sweep {event.sweep_deg:.0f} deg); "
-                        "watching, no takeover yet"
-                    ),
-                )
-            ]
-        # Repeat loiter at the same spot: the firmware circled this
-        # obstacle and passed its opening by, more than once.  Take
-        # over and aim at the middle of the ring it kept walking
-        # around - the pocket it never enters.
+        # Obstacle encounter: go straight into the along-edge logic,
+        # no waiting for the firmware to circle again.  The goal is
+        # the middle of the ring it is walking around - the pocket;
+        # the staging-ring exploration tries it from successive
+        # angles, and where there is a gap, that angle dives in.
         self._perimeter_handled.append(centre)
         # Seed the cluster from the loiter outline directly: opposite
         # extremes of the ring can be ~1.3 m apart, beyond the hit-merge
@@ -287,9 +270,10 @@ class BugNavController:
             goal=cluster.centre,
             tried_sectors=set(),
             notify_text=(
-                f"perimeter loiter #{count} at {cluster.centre}; firmware "
-                "keeps circling without entering - taking over, goal is "
-                "the centre of the circled area"
+                f"perimeter loiter at {cluster.centre} "
+                f"(path {event.path_m:.1f} m, sweep {event.sweep_deg:.0f} deg); "
+                "taking over with along-edge exploration, goal is the "
+                "centre of the circled area - where there is a gap, dive in"
             ),
         )
 
