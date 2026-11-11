@@ -82,6 +82,8 @@ class DeebotAdapter:
         self._error = 0
         self._last_pos_t = 0.0
         self.battery_pct: int | None = None  # latest BatteryEvent value
+        self.water_amount: int | None = None  # latest WaterInfoEvent amount 1..4
+        self.mop_attached: bool | None = None
 
     # ------------------------------------------------------------ convert
     def to_metres(self, raw_x: float, raw_y: float) -> Point:
@@ -174,6 +176,7 @@ class DeebotAdapter:
             ErrorEvent,
             PositionsEvent,
             StateEvent,
+            WaterInfoEvent,
         )
         from deebot_client.models import State
         from deebot_client.events import PositionType
@@ -248,19 +251,31 @@ class DeebotAdapter:
         async def on_battery(event) -> None:
             self.battery_pct = int(event.value)
 
+        async def on_water(event) -> None:
+            # Spray-amount setting (level), not a remaining level - the
+            # firmware exposes no tank level at all.  If this firmware
+            # rejects getWaterInfo the event simply never fires and
+            # water_amount stays None; the supervisor's virtual water
+            # gauge then falls back to its default amount.
+            self.water_amount = int(event.amount)
+            self.mop_attached = event.mop_attached
+
         self._device.events.subscribe(PositionsEvent, on_pos)
         self._device.events.subscribe(StateEvent, on_state)
         self._device.events.subscribe(ErrorEvent, on_error)
         self._device.events.subscribe(BatteryEvent, on_battery)
+        self._device.events.subscribe(WaterInfoEvent, on_water)
         self._PositionsEvent = PositionsEvent
         self._StateEvent = StateEvent
         self._BatteryEvent = BatteryEvent
+        self._WaterInfoEvent = WaterInfoEvent
 
     def request_refresh(self) -> None:
         if self._device is not None:
             self._device.events.request_refresh(self._PositionsEvent)
             self._device.events.request_refresh(self._StateEvent)
             self._device.events.request_refresh(self._BatteryEvent)
+            self._device.events.request_refresh(self._WaterInfoEvent)
 
     # ------------------------------------------------------------- sample
     def sample(self, t: float) -> Sample | None:

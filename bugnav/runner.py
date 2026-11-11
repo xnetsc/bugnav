@@ -169,7 +169,8 @@ async def _main_async(cfg_path: str, mode: str) -> None:
         digest = watch.digest(
             time.time(), controller.phase.value,
             home_cells=len(home_cells) or None,
-            robot_state=sample.state.value, charge_plan=plan)
+            robot_state=sample.state.value, charge_plan=plan,
+            charge_model=charge_model)
         verdict = sup_mod.Verdict()
         try:
             text = await llm_mod.chat(sup_mod.build_messages(digest))
@@ -232,6 +233,7 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                                 "error": sample.error_code,
                                 "phase": controller.phase.value,
                                 "battery": adapter.battery_pct,
+                                "water_amount": adapter.water_amount,
                             }
                         )
                         + "\n"
@@ -246,7 +248,8 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                             with open(home_path, "w", encoding="utf-8") as f:
                                 json.dump({"cells": sorted(home_cells)}, f)
                 watch.feed(sample, controller.phase.value, wall,
-                           battery=adapter.battery_pct)
+                           battery=adapter.battery_pct,
+                           water_amount=adapter.water_amount)
                 if not state["session_stopped"]:
                     await dispatch(controller.tick(sample))
                 # episode strategist servicing

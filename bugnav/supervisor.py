@@ -31,11 +31,13 @@ In observe mode verdicts are logged as shadow decisions only.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
-from collections import Counter
-from dataclasses import dataclass
+from collections import Counter, deque
+from dataclasses import dataclass, field
 
+from .chargeplan import ChargeModel
 from .model import RobotState, Sample
 
 CELL_M = 0.5
@@ -51,6 +53,22 @@ class SupervisorConfig:
     urgent_repeat_s: float = 300.0  # min gap between cap-triggered reviews
     docked_full_pct: int = 98  # docked at/above this = bout is over
     docked_idle_close_s: float = 1800.0  # docked this long = bout over
+    # Rolling-gauge windows (user 2026-11-11: judge on LIVE consumption,
+    # not only whole-bout averages, so a bout heading for an all-day
+    # finish is caught while there is still time to act).
+    rolling_window_s: float = 900.0  # ~15 min rolling drain/progress
+    eta_reserve_pct: float = 8.0  # battery reserve kept in ETA maths
+    eta_charge_to_pct: float = 90.0  # assumed target of future charges
+    # Virtual water gauge (user-settled 2026-11-11): the plumbed
+    # station refills + washes on every real dock stay, so a stay of at
+    # least water_reset_dock_s counts as water back to 100%.  Between
+    # stays the gauge drains by spray amount x newly mopped area.  The
+    # rates are relative placeholders (no observable "empty" event
+    # exists to calibrate against): 100% ~= 125/83/55 m^2 per level.
+    water_reset_dock_s: float = 120.0
+    water_rate_pct_per_m2: dict = field(
+        default_factory=lambda: {1: 0.8, 2: 1.2, 3: 1.8, 4: 2.4})
+    water_default_amount: int = 2
 
 
 @dataclass
@@ -91,12 +109,22 @@ class SessionWatch:
         self._docked_since_t: float | None = None
         self._charge_review_pending = False
         self._was_returning = False
+        # Rolling history: (sample.t, battery_pct, unique cells so far)
+        self._history: deque = deque()
+        # Virtual water gauge state.
+        self.water_amount: int | None = None
+        self._water_cells: set[tuple[int, int]] = set()
+        self._water_reset_t: float | None = None  # sample.t of last reset
+        self._water_reset_this_stay = False
 
     # ------------------------------------------------------------ feeding
     def feed(self, sample: Sample, phase: str, wall: float,
-             battery: int | None = None) -> None:
+             battery: int | None = None,
+             water_amount: int | None = None) -> None:
         if battery is not None:
             self.battery_pct = battery
+        if water_amount is not None:
+            self.water_amount = water_amount
         last = self._last
         dt = 0.0 if last is None else min(sample.t - last.t, 15.0)
         state = sample.state
@@ -112,8 +140,14 @@ class SessionWatch:
                 self.episodes_total = 0
                 self.errors = Counter()
                 self.bout_start_battery = self.battery_pct
+                self._history.clear()
+                # Leaving the station for a fresh bout = just washed
+                # and refilled: the virtual water gauge starts full.
+                self._water_cells = set()
+                self._water_reset_t = sample.t
             self.cleaning_now = True
             self._docked_since_t = None
+            self._water_reset_this_stay = False
             self.bout_cleaning_s += dt
             self.cleaning_since_review_s += dt
             if last is not None:
@@ -122,7 +156,15 @@ class SessionWatch:
             if cell != self._last_cell:
                 self.cell_entries += 1
                 self.cells.add(cell)
+                self._water_cells.add(cell)
                 self._last_cell = cell
+            if self.battery_pct is not None:
+                self._history.append(
+                    (sample.t, self.battery_pct, len(self.cells)))
+                while (self._history
+                       and sample.t - self._history[0][0]
+                       > self.cfg.rolling_window_s):
+                    self._history.popleft()
         elif state == RobotState.RETURNING:
             self.cleaning_now = False
             self._was_returning = True
@@ -140,6 +182,17 @@ class SessionWatch:
             self._last_cell = None
             if self._docked_since_t is None:
                 self._docked_since_t = sample.t
+            if (state == RobotState.DOCKED and self.bout_open
+                    and not self._water_reset_this_stay
+                    and sample.t - self._docked_since_t
+                    >= self.cfg.water_reset_dock_s):
+                # A real station stay, not a pass-through touch: the
+                # plumbed station washes the mop and refills, so the
+                # virtual water gauge resets to full (user-settled rule,
+                # 2026-11-11).
+                self._water_cells = set()
+                self._water_reset_t = sample.t
+                self._water_reset_this_stay = True
             if self.bout_open and (
                 (self.battery_pct or 0) >= self.cfg.docked_full_pct
                 or sample.t - self._docked_since_t >= self.cfg.docked_idle_close_s
@@ -194,10 +247,99 @@ class SessionWatch:
             return round(used / cov, 3)
         return None
 
+    # ------------------------------------------------------------- gauges
+    def _rolling_span(self) -> tuple[float, float, float] | None:
+        """(battery used %, new area m^2, span min) over the window."""
+        if len(self._history) < 2:
+            return None
+        t0, b0, c0 = self._history[0]
+        t1, b1, c1 = self._history[-1]
+        span_min = (t1 - t0) / 60.0
+        if span_min < 5.0:
+            return None
+        return (b0 - b1, (c1 - c0) * CELL_AREA_M2, span_min)
+
+    def rolling_drain_pct_per_m2(self) -> float | None:
+        """Battery % per NEW m^2 over the recent window (live rate)."""
+        span = self._rolling_span()
+        if span is None:
+            return None
+        used, new_m2, _ = span
+        if used >= 2 and new_m2 >= 2.0:
+            return round(used / new_m2, 3)
+        return None
+
+    def rolling_progress_m2_per_min(self) -> float | None:
+        """New-coverage rate over the recent window."""
+        span = self._rolling_span()
+        if span is None:
+            return None
+        _, new_m2, span_min = span
+        if new_m2 > 0:
+            return round(new_m2 / span_min, 2)
+        return None
+
+    def water_pct_est(self) -> float:
+        """Virtual water gauge: 100 after a station wash/refill, then
+        drains by spray amount x area mopped since (user-settled model;
+        the firmware exposes no real level)."""
+        amount = self.water_amount or self.cfg.water_default_amount
+        rate = self.cfg.water_rate_pct_per_m2.get(
+            amount, self.cfg.water_rate_pct_per_m2[2])
+        used = len(self._water_cells) * CELL_AREA_M2 * rate
+        return round(max(0.0, 100.0 - used), 1)
+
+    def estimate_eta(self, wall: float, home_cells: int,
+                     model: ChargeModel | None = None) -> dict | None:
+        """Projected finish: remaining area at the live progress rate,
+        plus the charge cycles the remaining energy shortfall implies
+        (each charged to eta_charge_to_pct at the model's band rates,
+        plus per-cycle overhead).  None when no honest projection is
+        possible (no progress signal yet)."""
+        remaining = max(0, home_cells - len(self.cells)) * CELL_AREA_M2
+        if remaining <= 0:
+            return {"eta_minutes_left": 0.0,
+                    "eta_finish": time.strftime(
+                        "%H:%M", time.localtime(wall)),
+                    "eta_charges_left": 0}
+        progress = self.rolling_progress_m2_per_min()
+        if progress is None and self.bout_cleaning_s >= 300:
+            avg = self.covered_m2() / (self.bout_cleaning_s / 60.0)
+            progress = round(avg, 2) if avg > 0 else None
+        if not progress:
+            return None
+        model = model or ChargeModel()
+        drain = (self.rolling_drain_pct_per_m2()
+                 or self.drain_pct_per_m2()
+                 or model.drain_pct_per_m2)
+        clean_min = remaining / progress
+        charges = 0
+        charge_min = 0.0
+        if self.battery_pct is not None:
+            need = remaining * drain
+            usable = max(0.0, self.battery_pct - self.cfg.eta_reserve_pct)
+            if need > usable:
+                per_cycle = self.cfg.eta_charge_to_pct - self.cfg.eta_reserve_pct
+                charges = math.ceil((need - usable) / per_cycle)
+                charge_min = charges * (
+                    model.charge_minutes(self.cfg.eta_reserve_pct,
+                                         self.cfg.eta_charge_to_pct)
+                    + model.overhead_s / 60.0)
+        total = clean_min + charge_min
+        return {
+            "eta_minutes_left": round(total, 1),
+            "eta_finish": time.strftime(
+                "%H:%M", time.localtime(wall + total * 60)),
+            "eta_charges_left": charges,
+            "eta_assumes_progress_m2_per_min": progress,
+            "eta_assumes_drain_pct_per_m2": drain,
+        }
+
     def digest(self, wall: float, phase: str, *,
                home_cells: int | None = None,
                robot_state: str = "",
-               charge_plan: dict | None = None) -> dict:
+               charge_plan: dict | None = None,
+               charge_model: ChargeModel | None = None) -> dict:
         revisit = 0.0
         if self.cell_entries:
             revisit = round(1.0 - len(self.cells) / self.cell_entries, 2)
@@ -217,11 +359,24 @@ class SessionWatch:
             "robot_state": robot_state,
             "battery_pct": self.battery_pct,
             "learned_drain_pct_per_m2": self.drain_pct_per_m2(),
+            "rolling_drain_pct_per_m2": self.rolling_drain_pct_per_m2(),
+            "rolling_progress_m2_per_min":
+                self.rolling_progress_m2_per_min(),
+            "water_pct_est": self.water_pct_est(),
+            "water_amount": self.water_amount,
+            "water_note": "virtual gauge: 100% after each station wash/"
+                          "refill, drains by spray amount x area since",
         }
+        if self._water_reset_t is not None and self._last is not None:
+            d["minutes_since_water_reset"] = round(
+                (self._last.t - self._water_reset_t) / 60, 1)
         if home_cells:
             remaining = max(0, home_cells - len(self.cells)) * CELL_AREA_M2
             d["home_area_est_m2"] = round(home_cells * CELL_AREA_M2, 1)
             d["remaining_est_m2"] = round(remaining, 1)
+            eta = self.estimate_eta(wall, home_cells, charge_model)
+            if eta is not None:
+                d.update(eta)
         if charge_plan is not None:
             d["deterministic_charge_plan"] = charge_plan
         return d
@@ -237,7 +392,13 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 - notify：有异常值得用户知道，但还不至于停（如反复清扫同一区域、电量消耗异常）。
 - abandon_current：当前这一个绕障 episode 明显在空转，放弃它、其余继续。
 - stop_session：整个任务已失去意义（反复打扫、长时间无有效进展、剩余无几却要再充一轮电等），直接结束。
-- 充电裁决（机器人回站充电中、摘要带 deterministic_charge_plan 时）：默认认可规划器的 resume_soc；只有你有明确理由（如剩余面积小到不值得再充、时段不合适）才用 resume_charge_pct 覆盖，或用 stop_session 结束。若剩余面积为 0 或极小，优先 stop_session 而不是再充再扫。
+- 预计完成时间（摘要带 eta_finish / eta_minutes_left 时）：这是按当前滚动推进速度与滚动耗电率推算的完工时刻（含预计充电轮次）。若 eta_finish 明显越界（如下午的任务拖到深夜）、或 eta_charges_left 还很多而剩余面积不大，要认真考虑 stop_session 或至少 notify，不要等软上限到了才反应。
+- 虚拟水量（water_pct_est）：无真实水位传感器，这是按「回站洗拖即补满、其后按喷水档位×拖过面积递减」推算的账面水量。低于约 20% 且短期不会回站时，拖布大概率在干拖，值得 notify 一句。
+- 充电裁决（机器人回站充电中、摘要带 deterministic_charge_plan 时）：这就是「要不要再放它出去续扫」的决策点，每一次都要重新判断，不默认放行。先过合理性这一关（见下面单场时长与作息），不合理就 stop_session；合理时默认认可规划器的 resume_soc，只有明确理由（如剩余面积小到不值得再充）才用 resume_charge_pct 覆盖。若剩余面积为 0 或极小，优先 stop_session 而不是再充再扫。
+- 单场时长与作息常识（每次裁决都要合并判断，不要孤立看任何单个数字）：
+  · 一次清扫任务的合理跨度：普通户型 1–2 小时，大户型 3–4 小时已是上限；拖到半天（约 6 小时以上）本身即不合理——除非摘要能证明面积确实巨大且推进速度正常，否则 stop_session，剩余留到下一次任务，不要为「扫完」无限续扫。一整天更不用说。
+  · 结合当前时刻与普通人作息：深夜至清晨（约 23:00–07:00）一般不应持续作业、更不应再放它出去续扫，除非任务开始时间表明这就是用户有意安排的时段；晚间居家时段长时间轰鸣也有打扰成本，已扫很久时倾向收尾。
+  · 合并看三件事：已扫总时长（bout_elapsed_min）、预计还要多久（eta_minutes_left / eta_finish）、当前时刻（now）。已扫很久 + 还要很久 + 时段不对，任意两条叠加就应认真考虑 stop_session 并在 message 里说明。
 判断要克制：数据不足以证明异常时选 continue，不要因为单纯耗时长就停大户型的正常清扫。"""
 
 
