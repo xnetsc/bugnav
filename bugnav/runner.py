@@ -27,6 +27,7 @@ from .chargeplan import ChargeModel, plan_resume
 from .controller import BugNavController, ControllerConfig
 from .deebot_adapter import AdapterConfig, DeebotAdapter
 from .model import Command, CommandKind, RobotState
+from .network import is_transient_network_error, retry_forever
 
 
 def _load_json(path: str) -> dict:
@@ -278,7 +279,11 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                 try:
                     await adapter.execute(cmd, log)
                 except Exception as exc:  # never crash the daemon
-                    log(f"command {cmd.kind} failed: {exc}")
+                    if is_transient_network_error(exc):
+                        log(f"command {cmd.kind} failed after retries "
+                            f"(network still down); continuing")
+                    else:
+                        log(f"command {cmd.kind} failed: {exc}")
             else:
                 log(f"[observe] would send {cmd.kind} {cmd.point or ''}")
 
@@ -418,8 +423,37 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                 log(f"charge plan: resume at {target}% "
                     f"(plan={plan}, verdict_override={verdict.resume_charge_pct})")
 
-    try:
+    # Background tasks (the library's refresh/event machinery, our
+    # consult/review services) must not dump a traceback for a cloud
+    # hiccup: transient network failures become one log line;
+    # anything else keeps the default handler with full detail.
+    def _on_loop_error(loop_, context) -> None:
+        exc = context.get("exception")
+        if exc is not None and is_transient_network_error(exc):
+            log(f"background task hit a network error "
+                f"({type(exc).__name__}); requests keep cycling "
+                f"and recover when the network returns")
+        else:
+            loop_.default_exception_handler(context)
+
+    asyncio.get_running_loop().set_exception_handler(_on_loop_error)
+
+    async def _connect_once() -> None:
+        # A fresh adapter per attempt: a connect that died halfway
+        # can leave a half-initialised device/MQTT client behind,
+        # and retrying on top of it risks duplicate subscriptions.
+        nonlocal adapter
+        adapter = DeebotAdapter(AdapterConfig(**account))
         await adapter.connect(log)
+
+    try:
+        # A network error during the initial connect is retried at
+        # a paced backoff (15s -> 30s -> 60s cap) instead of
+        # crash-looping the container; auth/protocol failures still
+        # raise immediately (see bugnav/network.py).
+        await retry_forever(
+            _connect_once, log=log,
+            what="connecting to the Ecovacs cloud")
     finally:
         clock_settled["done"] = True
         if pending_stamps and adapter.device_now() is None:

@@ -33,6 +33,7 @@ from dataclasses import dataclass
 
 from .geometry import Point
 from .model import Command, CommandKind, RobotState, Sample
+from .network import call_with_retry
 
 
 @dataclass
@@ -396,8 +397,16 @@ class DeebotAdapter:
         assert self._device is not None
 
         async def _exec(command) -> None:
-            raw = await self._device.execute_command(command)
-            self._note_device_clock(raw)
+            async def _once() -> None:
+                raw = await self._device.execute_command(command)
+                self._note_device_clock(raw)
+
+            # A cloud hiccup mid-command (proxy restart, router
+            # reboot) is retried at a paced interval instead of
+            # surfacing as a traceback or a lost command.
+            await call_with_retry(
+                _once, log=log,
+                what=f"command {type(command).__name__}")
 
         # V2 firmwares (like the T80S) reject the V1 "clean" command the
         # same way they reject getCleanInfo - then EVERY action, pause
