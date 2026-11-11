@@ -268,6 +268,37 @@ class TestGuaranteeSoc(unittest.TestCase):
         self.assertIn("不是死规则", SYSTEM)
 
 
+class TestChargeOptions(unittest.TestCase):
+    def test_options_priced_in_time(self):
+        w = SessionWatch(SupervisorConfig(enabled=True))
+        _sweep(w, 40, 0.0, 100, 90)
+        # Now it sits docked at 15%: options are priced from there.
+        w.feed(Sample(t=2000.0, pos=Point(0, 0), state=RobotState.DOCKED),
+               "monitor", wall=1_700_002_000.0, battery=15)
+        d = w.digest(1_700_002_000.0, "monitor", home_cells=80)
+        opts = d["charge_options"]
+        self.assertTrue(opts)
+        levels = [o["resume_soc"] for o in opts]
+        self.assertEqual(levels, sorted(levels))
+        mins = [o["charge_min_from_now"] for o in opts]
+        self.assertEqual(mins, sorted(mins))  # higher level, longer wait
+        buys = [o["buys_m2"] for o in opts]
+        self.assertEqual(buys, sorted(buys))
+        self.assertIn("ready_at", opts[0])
+        # Charging to 100 from 15 must cost much more than to 50.
+        by_level = {o["resume_soc"]: o for o in opts}
+        self.assertGreater(by_level[100]["charge_min_from_now"],
+                           by_level[50]["charge_min_from_now"] + 30)
+
+    def test_prompt_carries_waiting_cost_logic(self):
+        # User (2026-11-11): charging to 80% is unacceptable if ready
+        # only 3-4 hours later; 50% buying an acceptable area can be
+        # the right call.  The judge gets the time price per level.
+        self.assertIn("charge_options", SYSTEM)
+        self.assertIn("三四个小时", SYSTEM)
+        self.assertIn("可接受的面积", SYSTEM)
+
+
 class TestHomeCacheConsistency(unittest.TestCase):
     """User (2026-11-11): robot taken to another home / new map /
     different rooms -> cached denominators must not be reported as
