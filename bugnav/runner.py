@@ -257,6 +257,7 @@ async def _main_async(cfg_path: str, mode: str) -> None:
         "review_task": None,
         "charge_target": None,  # resume at this battery % (one-shot)
         "stop_requested": False,
+        "footprint_len": -1,
         "awaiting_until": None,   # ask_user: monotonic deadline
         "awaiting_since": 0.0,
         "awaiting_from": None,    # robot state when the ask began
@@ -654,6 +655,13 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                     # stop request is history.
                     state["stop_requested"] = False
                 state["bout_was_open"] = watch.bout_open
+                # Keep the controller's map current: the known
+                # cleanable footprint (home baseline + this bout)
+                # is what confirms walls by the map edge.
+                footprint = home_cells | watch.cells
+                if len(footprint) != state["footprint_len"]:
+                    state["footprint_len"] = len(footprint)
+                    controller.set_footprint(footprint)
                 # The safety layer watches the physical robot
                 # whenever it cleans - a stop REQUEST (which the
                 # robot may never have received, or may fail to

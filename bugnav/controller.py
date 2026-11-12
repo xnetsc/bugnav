@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from .clusters import ClusterManager, ObstacleCluster
+from .mapedge import wall_by_map
 from .detector import (
     DetectorConfig,
     PerimeterConfig,
@@ -118,6 +119,14 @@ class ControllerConfig:
     # again this session (the episode's own outcome - entered, or
     # abandoned and session-blacklisted - stands).
     perimeter_repeat_radius_m: float = 0.6
+    # Wall confirmation comes from the MAP, not from the motion
+    # shape (user rule 2026-11-12): a loiter centre at the edge of
+    # the known cleanable area - at least this much of the ring
+    # around it (probed a bit beyond the cluster) was never
+    # cleaned - IS a wall/corner and gets NO dive-in episode.
+    # Anything not confirmed at the area edge is furniture.
+    wall_min_outside_arc_deg: float = 120.0
+    wall_probe_extra_m: float = 0.55
     # LLM strategy advisor (see strategist.py). When enabled AND the
     # runner has an LLM configured, the fixed strategy consults the
     # advisor at its weak points instead of grinding on or giving up
@@ -140,6 +149,11 @@ class BugNavController:
         # Centres already taken over via the perimeter trigger this
         # session (a chair moves; nothing here outlives the session).
         self._perimeter_handled: list[Point] = []
+        # Known cleanable footprint (0.5 m cell keys), pushed by
+        # the runner (home baseline + this bout's cells).  Used
+        # ONLY to confirm walls by the map edge (see mapedge.py);
+        # empty = no map evidence = nothing is a wall.
+        self._footprint: set[tuple[int, int]] = set()
         self.trail = BreadcrumbTrail()
         self.clusters = ClusterManager()
         self.phase = Phase.MONITOR
@@ -183,6 +197,11 @@ class BugNavController:
         self._free_heading: float | None = None
 
     # ------------------------------------------------------------- public
+    def set_footprint(self, cells: set[tuple[int, int]]) -> None:
+        """The runner pushes the known cleanable footprint (home
+        baseline + this bout's cells) for map-edge wall checks."""
+        self._footprint = set(cells)
+
     def tick(self, sample: Sample) -> list[Command]:
         cmds: list[Command] = []
         if self.phase == Phase.MONITOR:
@@ -292,6 +311,24 @@ class BugNavController:
         else:
             cluster = ObstacleCluster(hits=list(event.ring_points))
             self.clusters.clusters.append(cluster)
+        # Map first (user rule 2026-11-12): a bump is not
+        # automatically a gap-hunt.  If the map says this spot is
+        # at the edge of the cleanable area, it is a wall/corner -
+        # a straight edge has no inside to dive into, so there is
+        # no episode; the robot's own edge handling continues and
+        # the struggle detector still watches independently.
+        is_wall, arc = wall_by_map(
+            centre, self._footprint,
+            cluster.radius_m + self.cfg.wall_probe_extra_m,
+            self.cfg.wall_min_outside_arc_deg)
+        if is_wall:
+            return [Command(
+                CommandKind.NOTIFY,
+                message=(
+                    f"perimeter loiter at {centre} confirmed as a "
+                    f"wall/corner by the map edge (never-cleaned "
+                    f"arc {arc:.0f} deg around it); no dive-in "
+                    f"episode - native edge handling continues"))]
         approach = angle_of(cluster.centre - sample.pos)
         return self._begin_episode(
             sample,
@@ -303,8 +340,10 @@ class BugNavController:
             notify_text=(
                 f"perimeter loiter at {cluster.centre} "
                 f"(path {event.path_m:.1f} m, sweep {event.sweep_deg:.0f} deg); "
-                "taking over with along-edge exploration, goal is the "
-                "centre of the circled area - where there is a gap, dive in"
+                f"map edge check: never-cleaned arc {arc:.0f} deg - "
+                "interior obstacle, not a wall; taking over with "
+                "along-edge exploration, goal is the centre of the "
+                "circled area - where there is a gap, dive in"
             ),
         )
 
