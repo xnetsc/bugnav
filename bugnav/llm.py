@@ -1,10 +1,10 @@
-"""Optional LLM assistance for OFFLINE analysis (never in the control loop).
+"""LLM access for the two judgement layers (supervisor, strategist).
 
-The real-time controller stays deterministic on purpose: cloud LLM calls
-are far too slow and too failure-prone to sit in a robot's reflex path.
-The LLM is used where latency does not matter - post-hoc analysis of the
-recorded samples/events (episode recaps, obstacle guesses, detector
-threshold advice). See tools/analyze_episodes.py.
+The real-time controller stays deterministic on purpose: cloud LLM
+calls are far too slow and too failure-prone to sit in a robot's
+reflex path.  The LLM is used where latency does not matter - the
+supervisor's periodic whole-bout verdicts and the strategist's
+per-episode consults.
 
 Configuration is environment-only (credentials never live in code or in
 config.json), against any OpenAI-compatible endpoint:
@@ -16,6 +16,7 @@ config.json), against any OpenAI-compatible endpoint:
 
 from __future__ import annotations
 
+import json
 import os
 
 DEFAULT_BASE_URL = "https://api.meta.ai/v1"
@@ -75,3 +76,29 @@ async def chat(messages: list[dict], *, timeout_s: float = 120.0) -> str:
                         f"LLM endpoint returned {resp.status}: "
                         f"{str(data)[:300]}")
     raise RuntimeError("LLM request failed")  # pragma: no cover
+
+
+class DecisionTrace:
+    """Append-only JSONL record of LLM decisions: the exact messages
+    sent, the raw reply and the parsed result, one line per call.
+    This is the input set for auditing verdict quality and for
+    replaying candidate models against identical inputs offline.
+    Recording is best-effort: a failed write never disturbs a
+    decision path."""
+
+    def __init__(self, path: str):
+        self.path = path
+
+    def record(self, kind: str, messages: list[dict], response: str,
+               parsed: dict | None, *, ts: float,
+               trigger: str | None = None) -> None:
+        try:
+            rec = {"ts": ts, "kind": kind, "trigger": trigger,
+                   "model": os.environ.get(
+                       "BUGNAV_LLM_MODEL", DEFAULT_MODEL),
+                   "messages": messages, "response": response,
+                   "parsed": parsed}
+            with open(self.path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass

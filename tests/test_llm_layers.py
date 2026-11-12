@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from bugnav.chargeplan import ChargeModel, plan_resume
 from bugnav.controller import BugNavController, ControllerConfig, Phase
 from bugnav.geometry import Point
+from bugnav.llm import DecisionTrace
 from bugnav.model import RobotState, Sample
 from bugnav.strategist import parse_plan
 from bugnav.supervisor import SessionWatch, SupervisorConfig, parse_verdict
@@ -181,6 +182,38 @@ class TestConsultFlow(unittest.TestCase):
             ctl._deadline = 0.0
             ctl.tick(Sample(t=10.0 + i, pos=Point(0.3, 0.0)))
             self.assertNotEqual(ctl.phase, Phase.CONSULT)
+
+
+class TestDecisionTrace(unittest.TestCase):
+    def test_records_round_trip_as_jsonl(self):
+        import json
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "llm_trace.jsonl")
+            trace = DecisionTrace(path)
+            msgs = [{"role": "system", "content": "s"},
+                    {"role": "user", "content": "摘要"}]
+            trace.record("supervisor", msgs, '{"action": "continue"}',
+                         {"action": "continue"}, ts=1794441006.0)
+            trace.record("strategist", msgs, "not json", None,
+                         ts=1794441100.0, trigger="stuck")
+            with open(path, encoding="utf-8") as f:
+                rows = [json.loads(line) for line in f]
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["kind"], "supervisor")
+            self.assertEqual(rows[0]["messages"], msgs)
+            self.assertEqual(rows[0]["response"],
+                             '{"action": "continue"}')
+            self.assertEqual(rows[0]["parsed"], {"action": "continue"})
+            self.assertIn("model", rows[0])
+            self.assertIsNone(rows[1]["parsed"])
+            self.assertEqual(rows[1]["trigger"], "stuck")
+
+    def test_write_failure_is_silent(self):
+        trace = DecisionTrace("/nonexistent-dir-xyz/llm_trace.jsonl")
+        trace.record("supervisor", [], "{}", {"action": "continue"},
+                     ts=0.0)  # must not raise
 
 
 if __name__ == "__main__":

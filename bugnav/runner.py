@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from dataclasses import asdict
 import os
 import sys
 import time
@@ -164,6 +165,8 @@ async def _main_async(cfg_path: str) -> None:
             "not set; running deterministic-only")
     sup_cfg.enabled = supervisor_on
     watch = sup_mod.SessionWatch(sup_cfg)
+    llm_trace = llm_mod.DecisionTrace(
+        os.path.join(data_dir, "llm_trace.jsonl"))
 
     # ---- persistent home map baseline (0.5 m grid) and learned charge
     # model.  home_cells is the ADOPTED baseline only: bout footprints
@@ -301,8 +304,13 @@ async def _main_async(cfg_path: str) -> None:
     async def service_consult(req) -> None:
         plan = None
         try:
-            text = await llm_mod.chat(strategist.build_messages(req.situation))
+            messages = strategist.build_messages(req.situation)
+            text = await llm_mod.chat(messages)
             plan = strategist.parse_plan(text)
+            llm_trace.record(
+                "strategist", messages, text,
+                asdict(plan) if plan is not None else None,
+                ts=_wall(), trigger=req.kind)
             log(f"strategy advisor ({req.kind}): plan={plan}")
         except Exception as exc:
             log(f"strategy advisor call failed: {exc}; using fallback")
@@ -357,8 +365,11 @@ async def _main_async(cfg_path: str) -> None:
             digest["stop_already_requested"] = True
         verdict = sup_mod.Verdict()
         try:
-            text = await llm_mod.chat(sup_mod.build_messages(digest))
+            messages = sup_mod.build_messages(digest)
+            text = await llm_mod.chat(messages)
             verdict = sup_mod.parse_verdict(text)
+            llm_trace.record("supervisor", messages, text,
+                             asdict(verdict), ts=_wall())
         except Exception as exc:
             log(f"supervisor call failed: {exc}; continuing")
         log(f"supervisor verdict: {verdict.action} "
