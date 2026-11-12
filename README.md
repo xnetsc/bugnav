@@ -78,9 +78,8 @@
 
 按节奏复核（清扫约 20 分钟一评、回站充电必评、异常加密），裁决词
 表有界：`continue / notify / abandon_current / stop_session /
-ask_user`，外加可选的续扫电量覆盖与充电参数矫正（见下）。observe
-模式只记影子裁决，active 才执行；`stop_session` = 停机 + 回站，不
-把机器人撂在原地。
+ask_user`，外加可选的续扫电量覆盖与充电参数矫正（见下）。裁决
+即执行；`stop_session` = 停机 + 回站，不把机器人撂在原地。
 
 ### 它拿到的测量（代码算、人不下结论）
 
@@ -179,12 +178,11 @@ macOS 通知中心 + 给用户本人发 iMessage（手机同步收到），launc
   `home_candidate.json`（候选布局）、`charge_model.json`（充电参
   数，含 AI 矫正结果）、`charge_history.json`（原始充电轨迹）、
   `stats.json`（跨次卡困统计）。
-- 模式：默认 observe（只读观察、影子裁决）；supervised 是中间
-  档——只有监督层发出的安全链命令（裁决停止/回站、询问暂停、
-  充电续扫）真实执行，控制器（导航）发出的命令连同其暂停一律
-  影子（导航的暂停与区域移动是一套动作，只发一半会把机器人晾
-  在原地；本固件亦拒绝脚本下发的区域命令）；active 是全部命令
-  真实执行，需先解开区域命令。
+- 无模式之分：守护进程下达的每条命令都真实执行，不存在影子
+  档（2026-11-12 按用户要求删除原 observe/supervised 分档）。
+  定点移动走 clean_V2 的 `mapPoint`（本固件唯一实现的定向移动
+  命令，已实机验证）；矩形区域命令 customArea 本固件拒绝
+  （20011），不用。
 
 快速开始：
 
@@ -193,7 +191,7 @@ macOS 通知中心 + 给用户本人发 iMessage（手机同步收到），launc
 python3 -m bugnav.demo
 python3 -m unittest discover -s tests
 
-# 2) 部署到宿主机（默认 observe 只读模式，验证通过才改 active）
+# 2) 部署到宿主机
 cp config.example.json config.json   # 填科沃斯账号短 ID
 sudo bash deploy/install.sh          # 或用 docker compose up -d
 ```
@@ -201,3 +199,22 @@ sudo bash deploy/install.sh          # 或用 docker compose up -d
 目录：`bugnav/`（核心逻辑+模拟器+真机适配）、`deploy/`（systemd 与
 Mac 部署件）、`tests/`（单元与三场景端到端测试）、`Dockerfile`、
 `docker-compose.yml`。
+
+## 验证状态（诚实标注）
+
+- 2026-11-12 实机事故复盘后已修（代码级、含回归测试）：监督层曾
+  用平速 1.1㎡/min 与最近窗口速度误判一场健康清扫为「不值得继
+  续」——ETA 与保守预期改按本场整体已证明速度投影，窗口速度只
+  作带标签的悲观界；stop 判决曾在影子模式下把进程自我闩锁、
+  整场后续无人监督——改为「请求≠事实」：监督持续到本场被观测
+  到真正结束、新场自动重置闩锁。
+- 已实机验证：云端登录与位置/状态/电量/错误流、全程跑通真实
+  定时清扫、监督裁决经真实 LLM 端点跑通；`getWorkState` 状态流；
+  2026-11-12 定点移动 `mapPoint`（下发 code 0、机器人按 GetPos
+  帧坐标驶向目标点、到达误差约 0.13 m）、STOP 停机、回站命令
+  均已实发验证。
+- 待实机验证：playSound 提示音（被困报警时触发）、喷水量档位
+  与 App 显示的对照标定。
+- 已知上限：自定义语音/对讲协议上不存在（只有内置提示音）；摄像
+  头画面走厂商专属会话，外置程序拿不到；脏污识别是固件内部行
+  为、不发事件。

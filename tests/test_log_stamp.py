@@ -30,25 +30,3 @@ class TestPosixTz(unittest.TestCase):
         self.assertEqual(_posix_tz(-5.0), "LOC+5")   # UTC-5
         self.assertEqual(_posix_tz(0.0), "LOC0")
         self.assertEqual(_posix_tz(5.5), "LOC-5:30")  # fractional
-
-
-class TestCommandExecutable(unittest.TestCase):
-    def test_mode_matrix(self):
-        from bugnav.model import CommandKind
-        from bugnav.runner import command_executable
-        for kind in CommandKind:
-            self.assertFalse(command_executable(kind, "observe"))
-            self.assertFalse(command_executable(
-                kind, "observe", executive=True))
-            self.assertTrue(command_executable(kind, "active"))
-            self.assertTrue(command_executable(
-                kind, "active", executive=True))
-            # supervised: controller-originated commands NEVER
-            # execute (a landed episode pause with shadow moves
-            # parks the robot); supervisor-originated ones do,
-            # except area commands.
-            self.assertFalse(command_executable(kind, "supervised"))
-            self.assertEqual(
-                command_executable(kind, "supervised",
-                                   executive=True),
-                kind != CommandKind.CLEAN_AREA)

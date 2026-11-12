@@ -15,6 +15,5 @@ services:
     volumes:
       - ./config.json:/app/config.json:ro
       - ./data:/app/data
-    # Start in observe mode. Switch to active only after the verification
-    # checklist in README.md has passed:
-    # command: ["python", "-m", "bugnav.runner", "--config", "config.json", "--mode", "active"]
+    # The daemon commands the robot for real (no shadow modes);
+    # the image's default command is used unless overridden here.

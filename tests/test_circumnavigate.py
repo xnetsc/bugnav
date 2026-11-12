@@ -35,7 +35,7 @@ class TestCircumnavigation(unittest.TestCase):
             for c in cmds:
                 if c.kind == CommandKind.NOTIFY:
                     notes.append(c.message)
-                if c.kind == CommandKind.CLEAN_AREA:
+                if c.kind == CommandKind.MOVE_TO:
                     new_target = c.point
             return new_target
 

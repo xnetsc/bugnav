@@ -156,8 +156,10 @@ class DeebotAdapter:
             y = -y
         return Point(x, y)
 
-    def to_raw_rect(self, centre: Point, half_m: float) -> str:
-        """Return the 'x1,y1,x2,y2' content string CleanArea expects."""
+    def to_raw_point(self, point: Point) -> str:
+        """The 'x,y' content string a mapPoint command expects - the
+        same raw frame GetPos reports in (calibrated live 2026-11-12:
+        commanded raw targets were reached within ~0.13 m)."""
         def raw_x(x_m: float) -> float:
             if self.cfg.invert_x:
                 x_m = -x_m
@@ -168,9 +170,7 @@ class DeebotAdapter:
                 y_m = -y_m
             return y_m * self.cfg.raw_per_meter + self.cfg.origin_raw_y
 
-        xs = sorted([raw_x(centre.x - half_m), raw_x(centre.x + half_m)])
-        ys = sorted([raw_y(centre.y - half_m), raw_y(centre.y + half_m)])
-        return f"{int(xs[0])},{int(ys[0])},{int(xs[1])},{int(ys[1])}"
+        return f"{int(round(raw_x(point.x)))},{int(round(raw_y(point.y)))}"
 
     # -------------------------------------------------------------- setup
     def _register_hardware_aliases(self, log) -> None:
@@ -456,7 +456,6 @@ class DeebotAdapter:
     async def execute(self, cmd: Command, log) -> None:
         from deebot_client.commands.json.clean import (
             Clean,
-            CleanArea,
             CleanAreaV2,
             CleanV2,
         )
@@ -480,6 +479,22 @@ class DeebotAdapter:
         # same way they reject getCleanInfo - then EVERY action, pause
         # and resume included, must go through clean_V2.
         clean_cls = CleanV2 if self.cfg.clean_command_v2 else Clean
+
+        class _RawArgs(CleanAreaV2):
+            """clean_V2 with caller-fixed args.  The stock classes
+            rewrite START into a bare RESUME while the robot reports
+            paused (Clean._execute); a raw-args command's _get_args
+            ignores the requested action, so what we built is what
+            goes out - required for mapPoint and for starting a
+            fresh AUTO clean after a mapPoint session."""
+
+            def __init__(self, args: dict) -> None:
+                self._raw_args = args
+                super().__init__(CleanMode.CUSTOM_AREA, "0,0", 1)
+
+            def _get_args(self, action):  # noqa: ANN001, ANN202
+                return self._raw_args
+
         if cmd.kind == CommandKind.PAUSE:
             await _exec(clean_cls(CleanAction.PAUSE))
             log("sent pause")
@@ -489,16 +504,31 @@ class DeebotAdapter:
         elif cmd.kind == CommandKind.RESUME_AUTO:
             await _exec(clean_cls(CleanAction.START))
             log("sent resume (auto clean start)")
+        elif cmd.kind == CommandKind.START_AUTO:
+            if self.cfg.clean_command_v2:
+                await _exec(_RawArgs(
+                    {"act": "start", "content": {"type": "auto"}}))
+            else:
+                await _exec(Clean(CleanAction.START))
+            log("sent start (fresh auto clean)")
         elif cmd.kind == CommandKind.RETURN_TO_DOCK:
             from deebot_client.commands.json import Charge
 
             await _exec(Charge())
             log("sent return-to-dock (charge)")
-        elif cmd.kind == CommandKind.CLEAN_AREA and cmd.point is not None:
-            rect = self.to_raw_rect(cmd.point, cmd.rect_half_m)
-            cls = CleanAreaV2 if self.cfg.clean_command_v2 else CleanArea
-            await _exec(cls(CleanMode.CUSTOM_AREA, rect, 1))
-            log(f"sent CUSTOM_AREA rect={rect}")
+        elif cmd.kind == CommandKind.MOVE_TO and cmd.point is not None:
+            if not self.cfg.clean_command_v2:
+                raise RuntimeError(
+                    "MOVE_TO needs the clean_V2 mapPoint command; "
+                    "this adapter is configured for V1 commands")
+            value = self.to_raw_point(cmd.point)
+            # content type 'mapPoint' - the one directed-movement
+            # type fw 1.61.0 implements (probed live 2026-11-12:
+            # code 0, robot drives to the point; customArea /
+            # spotArea are rejected with 20011).
+            await _exec(_RawArgs({"act": "start", "content": {
+                "type": "mapPoint", "value": value}}))
+            log(f"sent mapPoint value={value}")
         elif cmd.kind == CommandKind.PLAY_SOUND:
             from deebot_client.commands.json import PlaySound
 

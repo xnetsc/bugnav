@@ -413,7 +413,7 @@ class BugNavController:
             self.phase = Phase.RETREAT
             self._pending_target = self._anchor
             self._deadline = sample.t + self.cfg.retreat_timeout_s
-            cmds.append(Command(CommandKind.CLEAN_AREA, point=self._anchor))
+            cmds.append(Command(CommandKind.MOVE_TO, point=self._anchor))
         else:
             cmds.extend(self._next_attempt(sample))
         return cmds
@@ -450,7 +450,7 @@ class BugNavController:
                 self._pending_target = self._goal
                 self._deadline = sample.t + self.cfg.goal_timeout_s
                 self.detector.reset()
-                cmds.append(Command(CommandKind.CLEAN_AREA, point=self._goal))
+                cmds.append(Command(CommandKind.MOVE_TO, point=self._goal))
             elif timed_out:
                 cmds.extend(
                     self._attempt_failed(sample, "staging unreachable", physical=False)
@@ -516,7 +516,7 @@ class BugNavController:
         self.phase = Phase.TO_STAGING
         self._pending_target = staging
         self._deadline = sample.t + self.cfg.staging_timeout_s
-        return [Command(CommandKind.CLEAN_AREA, point=staging)]
+        return [Command(CommandKind.MOVE_TO, point=staging)]
 
     def _next_attempt(self, sample: Sample) -> list[Command]:
         """Advance the staging angle by one small step and go there."""
@@ -673,7 +673,7 @@ class BugNavController:
         ]
 
     def _consult_fallback(self, sample: Sample) -> list[Command]:
-        """No answer (or shadow mode): do what the fixed strategy does."""
+        """No answer: do what the fixed strategy does."""
         req = self.pending_consult
         self.pending_consult = None
         if req is not None and req.kind == "full_circle":
@@ -706,7 +706,7 @@ class BugNavController:
             cmds.append(
                 Command(CommandKind.NOTIFY,
                         message="advisor judges the obstacle resolved; resuming"))
-            cmds.append(Command(CommandKind.RESUME_AUTO))
+            cmds.append(Command(CommandKind.START_AUTO))
             self._end_episode(sample)
             return cmds
         if plan.abandon:
@@ -744,7 +744,7 @@ class BugNavController:
                 CommandKind.NOTIFY,
                 message=f"obstacle resolved ({how}) at {self._theta_deg:.0f} deg; resuming",
             ),
-            Command(CommandKind.RESUME_AUTO),
+            Command(CommandKind.START_AUTO),
         ]
         self._end_episode(sample)
         return cmds
@@ -778,10 +778,10 @@ class BugNavController:
             self._bt_start_dist = sample.pos.distance_to(
                 self._pending_target)
             self.detector.reset()
-            return [Command(CommandKind.CLEAN_AREA, point=self._pending_target)]
+            return [Command(CommandKind.MOVE_TO, point=self._pending_target)]
         cmds = [
             Command(CommandKind.NOTIFY, message="backtrack complete; resuming auto clean"),
-            Command(CommandKind.RESUME_AUTO),
+            Command(CommandKind.START_AUTO),
         ]
         self._end_episode(sample)
         return cmds
@@ -842,13 +842,13 @@ class BugNavController:
                 Command(CommandKind.NOTIFY,
                         message="detour rejoined the entry path; "
                                 "continuing out"),
-                Command(CommandKind.CLEAN_AREA, point=self._pending_target),
+                Command(CommandKind.MOVE_TO, point=self._pending_target),
             ]
         cmds = [
             Command(CommandKind.NOTIFY,
                     message="detour reached the area exit; "
                             "resuming auto clean"),
-            Command(CommandKind.RESUME_AUTO),
+            Command(CommandKind.START_AUTO),
         ]
         self._end_episode(sample)
         return cmds
@@ -888,7 +888,7 @@ class BugNavController:
             Command(CommandKind.NOTIFY, message=(
                 "original exit unreachable; left this area by another "
                 "opening - resuming auto clean")),
-            Command(CommandKind.RESUME_AUTO),
+            Command(CommandKind.START_AUTO),
         ]
         self._end_episode(sample)
         return cmds

@@ -34,7 +34,5 @@ Done. Next steps:
   1. Edit /opt/bugnav/config.json  (account short ID, country, device_id)
   2. Edit /opt/bugnav/bugnav.env   (ECOVACS_PASSWORD=...)
   3. systemctl start bugnav && journalctl -u bugnav -f
-  The service starts in OBSERVE mode: it never commands the robot.
-  Do the calibration + verification checklist in README.md before
-  switching --mode to active in the unit file.
+  The daemon commands the robot for real (no shadow modes).
 EOF

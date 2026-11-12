@@ -61,7 +61,7 @@ class TestBacktrackDetour(unittest.TestCase):
         self.assertIsNone(ctl._detour_goal)
         self.assertEqual(ctl.phase, Phase.BACKTRACK)
         self.assertEqual(ctl._pending_target, Point(-2.0, 0.0))
-        self.assertIn(CommandKind.CLEAN_AREA, _kinds(cmds))
+        self.assertIn(CommandKind.MOVE_TO, _kinds(cmds))
 
     def test_detour_rejoins_at_any_breadcrumb(self):
         pts = [Point(-1.0, 0.0), Point(-2.0, 0.0), Point(-3.0, 0.0)]
@@ -78,7 +78,7 @@ class TestBacktrackDetour(unittest.TestCase):
         self.assertEqual(ctl.phase, Phase.BACKTRACK)
         self.assertEqual(ctl._backtrack_points, [Point(-3.0, 0.0)])
         self.assertEqual(ctl._pending_target, Point(-3.0, 0.0))
-        self.assertIn(CommandKind.CLEAN_AREA, _kinds(cmds))
+        self.assertIn(CommandKind.MOVE_TO, _kinds(cmds))
 
     def test_detour_full_circle_declares_trapped(self):
         ctl = BugNavController(ControllerConfig())
@@ -90,7 +90,7 @@ class TestBacktrackDetour(unittest.TestCase):
         cmds = ctl._conclude_full_circle(
             Sample(t=10.0, pos=Point(0.0, 0.0), state=RobotState.PAUSED))
         self.assertIn(CommandKind.PAUSE, _kinds(cmds))
-        self.assertNotIn(CommandKind.RESUME_AUTO, _kinds(cmds))
+        self.assertNotIn(CommandKind.START_AUTO, _kinds(cmds))
         # The robot itself must sound the alarm too, not only the
         # program's notification (user 2026-11-11).
         sounds = [c for c in cmds if c.kind == CommandKind.PLAY_SOUND]
@@ -138,7 +138,7 @@ class TestBacktrackDetour(unittest.TestCase):
         # Reaching the escape point: out of the area, resume work.
         cmds = ctl.tick(Sample(t=10.0, pos=escape,
                                state=RobotState.CLEANING))
-        self.assertIn(CommandKind.RESUME_AUTO, _kinds(cmds))
+        self.assertIn(CommandKind.START_AUTO, _kinds(cmds))
         self.assertNotEqual(ctl.phase, Phase.TO_GOAL)
         # But if the corridor reappears mid-escape, rejoining wins.
         ctl2 = _ctl_in_backtrack(pts, Point(0.0, 0.0))
@@ -163,7 +163,7 @@ class TestBacktrackDetour(unittest.TestCase):
         for i in range(40):
             cmds = ctl.tick(Sample(t=float(i), pos=jiggle[i % 4],
                                    state=RobotState.CLEANING))
-            self.assertNotIn(CommandKind.CLEAN_AREA, _kinds(cmds))
+            self.assertNotIn(CommandKind.MOVE_TO, _kinds(cmds))
         self.assertIsNotNone(ctl._trapped_pos)
         # Moved by a human: latch clears.
         ctl.tick(Sample(t=100.0, pos=Point(2.0, 0.0),

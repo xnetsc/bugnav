@@ -7,4 +7,4 @@ COPY config.example.json .
 RUN mkdir -p data
 # config.json and data/ are mounted at runtime; the password comes from
 # the ECOVACS_PASSWORD environment variable only.
-CMD ["python", "-m", "bugnav.runner", "--config", "config.json", "--mode", "observe"]
+CMD ["python", "-m", "bugnav.runner", "--config", "config.json"]

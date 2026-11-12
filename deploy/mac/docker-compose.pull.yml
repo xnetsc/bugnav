@@ -17,14 +17,5 @@ services:
     volumes:
       - ./config.json:/app/config.json:ro
       - ./data:/app/data
-    # Default command in the image is observe mode. Switch to active only
-    # after the verification checklist passes, by uncommenting:
-    # Mode switch (default in the image is observe):
-    # supervised = supervisor-issued safety commands (verdict
-    # stop/return, ask pause, charge resume) execute for real;
-    # controller navigation commands, pauses included, stay
-    # shadow - this firmware rejects script-issued area commands
-    # (20011), and a landed navigation pause alone parks the robot.
-    # command: ["python", "-m", "bugnav.runner", "--config", "config.json", "--mode", "supervised"]
-    # active = everything executes (needs the area dialect solved):
-    # command: ["python", "-m", "bugnav.runner", "--config", "config.json", "--mode", "active"]
+    # The image's default command runs the daemon; every command
+    # it decides on is executed on the robot (no shadow modes).

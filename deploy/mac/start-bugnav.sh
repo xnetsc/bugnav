@@ -3,8 +3,8 @@
 # - starts Docker Desktop if needed and waits for the engine
 # - first run asks for the Ecovacs short ID + password (password is only
 #   written to ./.env with 600 perms, never echoed)
-# - builds and starts the container in OBSERVE mode (never commands the
-#   robot until you switch to active - see 说明.md)
+# - builds and starts the container (the daemon commands the robot
+#   for real - there are no shadow modes)
 set -euo pipefail
 cd "$(dirname "$0")"
 echo "== bugnav 容器部署（Mac）=="
@@ -49,7 +49,7 @@ chmod 600 .env 2>/dev/null || true
 mkdir -p data
 docker compose up -d --build
 echo
-echo "== 容器已启动（observe 只读模式）。最近日志： =="
+echo "== 容器已启动。最近日志： =="
 sleep 3
 docker compose logs --tail 40 bugnav || true
 echo

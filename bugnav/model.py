@@ -33,7 +33,16 @@ class CommandKind(str, Enum):
     PAUSE = "pause"
     STOP = "stop"
     RESUME_AUTO = "resume_auto"
-    CLEAN_AREA = "clean_area"  # go clean a small rect around `point`
+    # Start a FRESH AUTO clean, whatever session state the robot is
+    # in.  Needed after MOVE_TO hops: a mapPoint command replaces
+    # the running session, and once it completes the robot sits
+    # paused with nothing to resume - deebot-client even rewrites a
+    # plain START into a bare resume while paused, which is then a
+    # no-op (probed live 2026-11-12: robot stayed paused 100 s).
+    # The adapter sends the raw clean_V2 start form, which the
+    # rewrite cannot touch; the robot starts cleaning at once.
+    START_AUTO = "start_auto"
+    MOVE_TO = "move_to"  # drive to `point` (clean_V2 mapPoint)
     RETURN_TO_DOCK = "return_to_dock"  # head back to the station now
     PLAY_SOUND = "play_sound"  # the robot's OWN built-in alert sound
     NOTIFY = "notify"
@@ -42,8 +51,7 @@ class CommandKind(str, Enum):
 @dataclass(frozen=True)
 class Command:
     kind: CommandKind
-    point: Point | None = None  # centre for CLEAN_AREA
-    rect_half_m: float = 0.30  # half side length of the CLEAN_AREA rect
+    point: Point | None = None  # target for MOVE_TO
     message: str = ""
     count: int = 1  # repetitions (PLAY_SOUND)
 

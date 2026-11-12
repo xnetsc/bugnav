@@ -68,9 +68,9 @@ def run_scenario(name: str, max_t: float = 4000.0, dt: float = 0.5):
         stats = controller.stats
         abandoned = any(s.abandons > 0 for s in stats.values())
         succeeded = any(s.successes > 0 for s in stats.values())
-        resumed = any(c.kind == CommandKind.RESUME_AUTO for c in cmds)
+        resumed = any(c.kind == CommandKind.START_AUTO for c in cmds)
         if abandoned and resumed:
-            break  # backtrack already finished when RESUME_AUTO is emitted
+            break  # backtrack already finished when START_AUTO is emitted
         if succeeded and resumed and end_after is None:
             end_after = t + 90.0  # give the stock robot time to finish up
         if reached_goal and succeeded:

@@ -9,10 +9,9 @@ WorkingDirectory=/opt/bugnav
 # Password lives ONLY here (file perms 600, owned by root). Never put it
 # in config.json and never in the repo.
 EnvironmentFile=/opt/bugnav/bugnav.env
-ExecStart=/opt/bugnav/.venv/bin/python -m bugnav.runner --config /opt/bugnav/config.json --mode observe
+ExecStart=/opt/bugnav/.venv/bin/python -m bugnav.runner --config /opt/bugnav/config.json
 Restart=always
 RestartSec=10
-# Switch --mode to active only after the verification checklist passes.
 
 [Install]
 WantedBy=multi-user.target

@@ -4,7 +4,7 @@ The simulated *stock* robot is deliberately dumb in the same way the
 real firmware is: in AUTO mode it drives straight at its goal, and when
 it meets an obstacle it jiggles back and forth forever - it never gives
 up and never replans.  When it receives an external command (our
-controller's CLEAN_AREA), it uses a grid A* planner over the walls it
+controller's MOVE_TO), it uses a grid A* planner over the walls it
 can see, like the real robot's map-based planner would: it can route
 *around* an obstacle, but it cannot pass through a closed side.
 
@@ -152,11 +152,12 @@ class SimRobot:
         elif cmd.kind == CommandKind.STOP:
             self.mode = "idle"
             self._path = []
-        elif cmd.kind == CommandKind.RESUME_AUTO:
+        elif cmd.kind in (CommandKind.RESUME_AUTO,
+                          CommandKind.START_AUTO):
             self.mode = "auto"
             self._contact = None
             self._path = []
-        elif cmd.kind == CommandKind.CLEAN_AREA and cmd.point is not None:
+        elif cmd.kind == CommandKind.MOVE_TO and cmd.point is not None:
             self.mode = "command"
             self._contact = None
             self._plan_to(cmd.point)

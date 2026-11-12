@@ -119,8 +119,7 @@ Reviews on a cadence (about every 20 min of cleaning, always when
 docked for charging, sooner on anomalies), with a bounded verdict
 vocabulary: `continue / notify / abandon_current / stop_session /
 ask_user`, plus an optional resume-charge override and charge-model
-calibration (below). In observe mode verdicts are logged as shadow
-decisions only; in active mode they execute. `stop_session` means
+calibration (below). Verdicts execute. `stop_session` means
 stop **and** return to dock — the robot is never left sitting
 wherever it stopped.
 
@@ -268,14 +267,12 @@ while it was down.
   (candidate layout), `charge_model.json` (charge parameters,
   including AI calibrations), `charge_history.json` (raw charge
   trajectories), `stats.json` (cross-session stuck statistics).
-- Modes: observe by default (read-only, shadow verdicts);
-  supervised is the middle step - only supervisor-issued safety
-  commands (verdict stop / return, ask-user pause, charge resume)
-  execute for real; everything the navigation controller emits,
-  its pauses included, stays shadow (a navigation pause without
-  its area moves would park the robot mid-room, and this firmware
-  rejects script-issued area commands anyway); active executes
-  everything and needs the area dialect solved.
+- No modes: every command the daemon decides on is executed on
+  the robot - there is no shadow tier (the observe/supervised
+  split was removed on 2026-11-12 at the user's direction).
+  Directed movement uses clean_V2 `mapPoint`, the one movement
+  type this firmware implements (verified live); the rectangle
+  command customArea is rejected (20011) and is not used.
 
 Quick start:
 
@@ -284,8 +281,7 @@ Quick start:
 python3 -m bugnav.demo
 python3 -m unittest discover -s tests
 
-# 2) Deploy to the host (observe mode by default; go active only
-#    after verification)
+# 2) Deploy to the host
 cp config.example.json config.json   # fill in the account short ID
 sudo bash deploy/install.sh          # or: docker compose up -d
 ```
@@ -307,17 +303,15 @@ three-scenario end-to-end tests), `Dockerfile`, `docker-compose.yml`.
   a fact: supervision runs until the bout is observed to end, and
   latches reset on a new bout.
 - Verified on the real robot: cloud login and the position /
-  (initial) state / battery / error streams; a full real scheduled
-  clean observed end to end; supervisor verdicts served by the real
-  LLM endpoint.
-- Implemented, pending on-robot verification with the next image
-  pull and restart: whether `getWorkState` is accepted by the
-  firmware (the state-stream fix), the water-info reading in
-  practice (the firmware answers; its customAmount payload shape
-  is handled by a local tolerant parser), coordinate scale
-  calibration (3 m
-  two-point method) and sub-metre area commands, the playSound
-  alert tone, the full active mode chain.
+  state / battery / error streams; a full real scheduled clean
+  observed end to end; supervisor verdicts served by the real LLM
+  endpoint; the `getWorkState` state stream; and on 2026-11-12
+  directed movement via `mapPoint` (code 0, the robot drives to
+  the commanded point in the GetPos frame, ~0.13 m arrival
+  error), STOP, and return-to-dock - all sent and observed live.
+- Pending on-robot verification: the playSound alert tone (fires
+  on a trapped declaration), and calibrating the water gauge
+  bands against the app's display.
 - Known ceilings: no custom voice/intercom exists in the protocol
   (built-in sounds only); the camera feed runs over a vendor-only
   session an external program cannot join; dirt detection is
