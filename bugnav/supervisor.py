@@ -472,6 +472,22 @@ class SessionWatch:
         span = self._rolling_span()
         return round(span[1], 1) if span is not None else None
 
+    def bout_overall_pace_m2_per_min(self) -> float | None:
+        """The whole bout's demonstrated pace: covered area over
+        cleaning time.  The rolling rate prices only the CURRENT
+        terrain - a robot negotiating one chair pocket shows ~0.2
+        even in a healthy bout (live case 2026-11-12: 16 min in a
+        pocket after a fast open-floor start, and the rolling-only
+        figures talked the judge into stopping a 21-minute bout
+        that finished the home in 57).  The overall pace prices the
+        bout's whole mix of open floor and obstacles, so it is the
+        honest basis for projecting the REST of the home and for
+        the conservative expectation."""
+        if self.bout_cleaning_s >= 300 and self.covered_m2() > 0:
+            return round(
+                self.covered_m2() / (self.bout_cleaning_s / 60.0), 2)
+        return None
+
     def pace_stalled(self) -> bool:
         """Speed anomaly, deliberately cache-free (user 2026-11-11):
         the rolling window passed with (almost) no NEW coverage while
@@ -611,10 +627,14 @@ class SessionWatch:
             return {"eta_minutes_left": 0.0,
                     "eta_finish": self._hm(wall),
                     "eta_charges_left": 0}
-        progress = self.rolling_progress_m2_per_min()
-        if progress is None and self.bout_cleaning_s >= 300:
-            avg = self.covered_m2() / (self.bout_cleaning_s / 60.0)
-            progress = round(avg, 2) if avg > 0 else None
+        # Main projection at the bout's OVERALL demonstrated pace
+        # (the mix of terrain actually met); the recent window's
+        # pace prices only the patch the robot is in right now and
+        # becomes a labelled pessimistic bound below, never the
+        # headline ETA (live case 2026-11-12 above).
+        recent = self.rolling_progress_m2_per_min()
+        overall = self.bout_overall_pace_m2_per_min()
+        progress = overall if overall is not None else recent
         if not progress:
             return None
         model = model or ChargeModel()
@@ -633,7 +653,7 @@ class SessionWatch:
                                          self.cfg.eta_charge_to_pct)
                     + model.overhead_s / 60.0)
         total = clean_min + charge_min
-        return {
+        out = {
             "eta_minutes_left": round(total, 1),
             # The whole bout's span if this projection holds: elapsed
             # so far + waiting/charging + remaining cleaning.  Charging
@@ -645,6 +665,17 @@ class SessionWatch:
             "eta_assumes_progress_m2_per_min": progress,
             "eta_assumes_drain_pct_per_m2": drain,
         }
+        # Pessimistic bound, labelled as what it is: IF the current
+        # patch's pace persisted across ALL remaining area.  When
+        # it diverges widely from the main projection, the honest
+        # reading is "the hard part is the patch it is in now", not
+        # "the whole home will go this slowly".
+        if recent and overall and recent < 0.75 * overall:
+            alt_total = remaining / recent + charge_min
+            out["eta_minutes_left_if_recent_pace"] = round(alt_total, 1)
+            out["projected_span_if_recent_pace_min"] = round(
+                (wall - self.bout_start_wall) / 60 + alt_total, 1)
+        return out
 
     def digest(self, wall: float, phase: str, *,
                home_cells: int | None = None,
@@ -675,6 +706,8 @@ class SessionWatch:
             "rolling_drain_pct_per_m2": self.rolling_drain_pct_per_m2(),
             "rolling_progress_m2_per_min":
                 self.rolling_progress_m2_per_min(),
+            "bout_overall_pace_m2_per_min":
+                self.bout_overall_pace_m2_per_min(),
             "rolling_new_m2": self.rolling_new_m2(),
             "pace_stalled": self.pace_stalled(),
             "charge_segments": self.segments[-4:],
@@ -743,15 +776,19 @@ class SessionWatch:
             if expected > 0:
                 d["expected_total_min_for_planned_area"] = expected
             # Conservative expectation: same cleanable area at the
-            # pace THIS environment has actually demonstrated - the
-            # rolling pace already prices in every obstacle encounter,
-            # detour and retry, so it is the honest speed yardstick in
-            # a cluttered home (user 2026-11-11).
+            # pace this bout has demonstrated OVERALL - the mix of
+            # open floor and obstacle work actually met, which is
+            # the honest speed yardstick in a cluttered home.  (Was:
+            # the ROLLING pace, gated to >=0.25 - in the 2026-11-12
+            # live case the rolling pace had collapsed to 0.2 inside
+            # a pocket, the gate silently dropped the conservative
+            # yardstick from the digest, and the judge fell back to
+            # the nominal ratio alone and stopped a healthy bout.)
             expected_cons = None
-            pace = self.rolling_progress_m2_per_min()
-            if pace is None and self.bout_cleaning_s >= 600:
-                pace = self.covered_m2() / (self.bout_cleaning_s / 60.0)
-            if pace is not None and 0.25 <= pace < 1.1:
+            pace = self.bout_overall_pace_m2_per_min()
+            if pace is None:
+                pace = self.rolling_progress_m2_per_min()
+            if pace is not None and 0 < pace < 1.1:
                 expected_cons = expected_total_minutes(
                     cleanable_m2, model, speed_m2_per_min=pace)
                 d["expected_total_min_conservative"] = expected_cons
@@ -807,6 +844,7 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 - 速度异常与总面积无关（任何时候都成立）：pace_stalled=true 表示最近约 15 分钟几乎没有新增覆盖、却一直在「清扫」——这本身就是异常，该 notify 或 stop 就处理，不要因为本场没有剩余面积/ETA（如地图缓存对不上、基准缺席）就跳过判断。反过来，在基准缺席的陌生大户型里，只要推进正常、重扫率低，单纯耗时长不算异常，不要把本户的时长上限硬套上去。
 - 虚拟水量（water_pct_est）：无真实水位传感器，这是按「回站洗拖即补满、其后按喷水档位×拖过面积递减」推算的账面水量。低于约 20% 且短期不会回站时，拖布大概率在干拖，值得 notify 一句。
 - 地图缓存对不上（摘要带 home_based_figures_withheld 时）：本场扫的区域与缓存的全屋面积显著不同——多半是换了地图、换了清扫房间，或把机器人带去了别处。此时摘要已扣下剩余面积/覆盖率/预计完成时间，不要拿它们做判断，按已扫时长、推进速度、重扫率照常判断即可；这件事本身值得 notify 用户一句。缓存基准会在新布局连续出现两场后自动重建，不用管。
+- 收尾已请求（摘要带 stop_already_requested 时）：此前已裁决过 stop_session，命令已下发（只读模式下为已记录），但机器人尚未实际结束本场。不要重复下同一结论、不要重复通知；继续观察即可——只有情况质变（如它又开始大面积推进、回站后又自行续扫、或长时间仍未回站）才重新判断。
 - 充电裁决（机器人回站充电中、摘要带 deterministic_charge_plan 时）：这就是「要不要再放它出去续扫」的决策点，每一次都要重新判断，不默认放行。先过合理性这一关（见下面单场时长与作息），不合理就 stop_session；合理时默认认可规划器的 resume_soc，只有明确理由（如剩余面积小到不值得再充）才用 resume_charge_pct 覆盖。若剩余面积为 0 或极小，优先 stop_session 而不是再充再扫。
 - 短周期反复充电（摘要 short_cycle_thrashing=true 时）：充完回来扫没多久又没电、已经反复多轮——这说明续扫电量或耗电估计根本没处理好，处置由你裁决（系统不自动改电量）。结合 charge_segments 诊断：每轮出发电量（start_batt）不高，是充得太少——可以抬高 resume_charge_pct 让它一次充够再放行；出发电量已高却很快耗尽（end_batt 很快见底），是耗电异常，值得 notify 用户；若已反复多轮、剩余又不多，直接 stop_session 收尾。
 - 充电标准是个平衡题，不是「必须一次充够扫完剩余」：天平一端是「一口气扫完剩余」——摘要的 resume_soc_to_guarantee_finish 是它需要的出发电量（按当前耗电估算加安全系数），充到它意味着等得久些、但后面零回站；另一端是「分多轮」——少充快走，代价是每多一轮就多付一遍回站开销（回程+洗拖布+复位，规划器按约 5 分钟/轮计）外加多轮的充电尾段损耗。deterministic_charge_plan 就是规划器在这架天平上按总时间算出的平衡点，charge_options 把每一档的价格都摊开了。对照着判断：剩余越少，一口气的等待越短、越划算；剩余越多，死等一口气越可能把总跨度撑爆，分轮反而总时间更短。用 resume_charge_pct 覆盖规划器时，等于你在天平上另选一点，要在 reason 里说清往哪端偏、为什么。唯一的下限是别碎成短周期抖动那种碎法——每一轮出发都要能扫出像样的面积。
@@ -815,12 +853,13 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 - 充电参数矫正（由你持续做）：充电不是线性的——低电量段充得快、高电量段充得慢（如 30%→50% 可能只要 10 分钟，50%→80% 却要 30 分钟），而且这台机器的真实曲线会随电池状态漂移。摘要的 charge_history_recent 是最近几次回站充电的原始记录（marks 是 [电量%, 已用分钟] 轨迹打点），charge_model_in_use 是当前在用的分段速率与单位面积耗电。对照两者：若某电量段的实测速度与在用参数明显对不上、或耗电率漂移了，就在裁决里加 "charge_model_update": {"band_rates": [[上限电量, %/分钟], ... 一直覆盖到 100], "drain_pct_per_m2": 数值}（两项可只给一项），给出你矫正后的参数，系统会采用并长期保存、后续规划都用新参数。只依据实测历史矫正，没有足够历史或对不上不明显时不要带这个字段——保持原参数好过凭空乱改。
 以上是判断逻辑，不是死规则：结合摘要全貌（进度、速度、电量、时刻、已投入时长）综合裁量；拿不准时先认可规划器的平衡点，或倾向于「少折腾」。
 - 单场时长与作息常识（每次裁决都要合并判断，不要孤立看任何单个数字）：
-  · 合理时长不看绝对钟点、看与计划面积是否相称：摘要的 expected_total_min_for_planned_area 是按合理清扫速度扫完计划面积本应花的总时间（含必要充电），projected_vs_expected_ratio 是「已花+预计总跨度」与它的比值。比值越接近 1，效率越与面积相称；比值明显大于 1，说明效率出了问题（重扫、推进塌陷、充电策略不当），偏离越大越不合理，应考虑 stop_session、剩余留到下一次，不要为「扫完」无限续扫。但比率只判效率、不判可接受性：无论速度多合理，总跨度底线（见充电条）优先于比率。这里和下文所有数字都是测量与算术，不是阈值规则——多少算过分，由你综合判断，不要用写死的「几小时」一刀切。home_note 与 normal_session_max_min 是用户按自家情况给的经验参考：范围信息（扫哪些房间）照用，时长与面积推导冲突时以面积推导为准。
-  · 环境复杂度要计价：障碍多的环境推进慢是正常代价，且名义面积里有一块是障碍占住、永远扫不到的。摘要若带 blocked_area_est_m2 / cleanable_area_est_m2，预期时长已按可扫面积算；另有保守预期（expected_total_min_conservative、projected_vs_conservative_ratio）是按本环境已证明的速度算的——先看保守比率：落在乐观与保守之间，多半是复杂环境的正常成本；连保守预期都超出一大截，才更像真问题。
-  · 试探时间单独看：low_yield_share_recent 是最近一段时间「在清扫、却没扫到新面积」的时间占比（绕障试探、脱困、重扫都在内），advancing_pace_m2_per_min 是剔除这段时间后的推进速度。试探期间推进接近零是合理的，demonstrated_pace 已把试探成本算进整体——判断整体进度用含试探的速度，不要拿 advancing_pace 去要求含试探的整体，也不要因为某段时间没进展就直接判异常。
+  · 合理时长不看绝对钟点、看与计划面积是否相称：摘要的 expected_total_min_for_planned_area 是按合理清扫速度扫完计划面积本应花的总时间（含必要充电），projected_vs_expected_ratio 是「已花+预计总跨度」与它的比值。比值越接近 1，效率越与面积相称；比值明显大于 1，说明效率出了问题（重扫、推进塌陷、充电策略不当），偏离越大越不合理，应考虑 stop_session、剩余留到下一次，不要为「扫完」无限续扫。但比率只判效率、不判可接受性：无论速度多合理，总跨度底线（见充电条）优先于比率。反过来也一样，而且是硬约束：预计总跨度还在本户常态之内（span_over_normal_min 不为正）、本场实际进行的时间也不长时，比率再高也只是「这场偏慢」的观察，不是「不值得继续」的判决——不许据此 stop_session，最多 notify 说明慢在哪里、继续观察。stop_session 必须能用总跨度或时段写出理由（预计完工钟点不可接受、会跨进深夜或晚间居家时段）；只有效率类理由（比率高、近期低产出、滚动耗电高）永远不够。一场才扫了二三十分钟、投影总跨度也才一小时上下的，无论如何谈不上「不值得」。这里和下文所有数字都是测量与算术，不是阈值规则——多少算过分，由你综合判断，不要用写死的「几小时」一刀切。home_note 与 normal_session_max_min 是用户按自家情况给的经验参考：范围信息（扫哪些房间）照用，时长与面积推导冲突时以面积推导为准。
+  · 环境复杂度要计价：障碍多的环境推进慢是正常代价，且名义面积里有一块是障碍占住、永远扫不到的。摘要若带 blocked_area_est_m2 / cleanable_area_est_m2，预期时长已按可扫面积算；另有保守预期（expected_total_min_conservative、projected_vs_conservative_ratio）是按本场整体已证明的速度（bout_overall_pace_m2_per_min，含全部试探成本）算的——先看保守比率：落在乐观与保守之间，多半是复杂环境的正常成本；连保守预期都超出一大截，才更像真问题。保守预期缺失时（多半是本场数据还太短），不要拿乐观比率单独定罪。ETA 的主投影（eta_minutes_left / projected_total_span_min）同样按本场整体速度算；摘要若带 eta_minutes_left_if_recent_pace / projected_span_if_recent_pace_min，那是「假设当前这片地形的手感延续到全屋」的悲观界，不是预计完工时间——两者差得远时，说明难的多半只是当前这片地，不要拿悲观界当投影。
+  · 试探时间单独看：low_yield_share_recent 是最近一段时间「在清扫、却没扫到新面积」的时间占比（绕障试探、脱困、重扫都在内），advancing_pace_m2_per_min 是剔除这段时间后的推进速度。试探期间推进接近零是合理的，demonstrated_pace 已把试探成本算进整体——判断整体进度用含试探的速度，不要拿 advancing_pace 去要求含试探的整体，也不要因为某段时间没进展就直接判异常。尤其注意：low_yield 高常常只是机器人正卡在一小片难啃的地形里（椅子腿林、桌下口袋，总共一两平米）——在小范围内反复冲撞、磨蹭是试探/集结层要现场处置的事，不是整场效率的判决书；看本场整体（covered_m2_this_bout、bout_overall_pace_m2_per_min）：整体已经推进了大半、只是卡在一片难区时，是继续观察或 notify，不是收尾。
   · 真因太复杂扫很久扫不完，要出声提示：若投影显示本场将远超可接受总跨度（projected_total_span_min / eta_finish），且主因是环境太复杂（试探占比高、episodes 频繁、按保守预期也快不了），必须用 notify 把话说清：预计几点能完、慢在哪里（障碍试探占了多少）、你打算怎么处置（收尾、只扫主体、还是继续）。不许无声地无限扫下去，也不许无声地放弃——用户有权知道这次为什么扫不完。
   · 结合当前时刻与普通人作息：深夜至清晨（约 23:00–07:00）一般不应持续作业、更不应再放它出去续扫，除非任务开始时间表明这就是用户有意安排的时段；晚间居家时段长时间轰鸣也有打扰成本，已扫很久时倾向收尾。
-  · 合并看三件事：已扫时长相对面积预期是否失衡（projected_vs_expected_ratio）、预计还要多久（eta_minutes_left / eta_finish）、当前时刻（now）。比率失衡 + 还要很久 + 时段不对，任意两条叠加就应认真考虑 stop_session 并在 message 里说明。
+  · 合并看三件事：已扫时长相对面积预期是否失衡（projected_vs_expected_ratio）、预计还要多久（eta_minutes_left / eta_finish）、当前时刻（now）。比率失衡 + 还要很久 + 时段不对，任意两条叠加就应认真考虑 stop_session 并在 message 里说明——但前一条的总跨度硬约束仍然优先：总跨度没超常态时，这里的「还要很久」必须是很久到完工钟点不可接受，而不是「比预期久」。
+  · 报数字要对口径：message 里引用面积或速度，必须分清是本场累计（covered_m2_this_bout）、本场整体平均（bout_overall_pace_m2_per_min）还是最近窗口（rolling_new_m2、rolling_progress_m2_per_min、rolling_drain_pct_per_m2）——窗口数字只能说成窗口的（如「最近一段时间新扫 X㎡」），不许说成全场结论。
 - 不必全覆盖（收尾宽容）：清扫没有「不遗漏任何区域」的义务，100% 覆盖不是目标，总耗时最短才是。覆盖率要对着可扫面积看（coverage_pct_of_cleanable）：障碍占住、进不去的区域不计入「剩下多少」；可扫部分已基本扫完，就不要为名义覆盖率不满而继续耗。已经扫了很久（如四五个小时）且计划区域的多数已经扫完（coverage_pct_of_home 约 85% 以上）时，剩下的零头不值得再花时间、更不值得再充一轮电去追——直接 stop_session 收尾就是合理选择，在 message 里说明已完成大部分、剩余留待下次即可。一般地，每次都要算剩余的「性价比」：剩余面积 vs 预计耗时（eta）vs 已投入时长；已投入越久，为零头继续的门槛应越高，已花的时长是沉没成本，不构成继续扫的理由。
 判断要克制：数据不足以证明异常时选 continue，不要因为单纯耗时长就停大户型的正常清扫。"""
 

@@ -19,4 +19,10 @@ services:
       - ./data:/app/data
     # Default command in the image is observe mode. Switch to active only
     # after the verification checklist passes, by uncommenting:
+    # Mode switch (default in the image is observe):
+    # supervised = the safety chain (pause/stop/return/resume/sound)
+    # executes for real; area-command navigation stays shadow -
+    # this firmware rejects script-issued area commands (20011).
+    # command: ["python", "-m", "bugnav.runner", "--config", "config.json", "--mode", "supervised"]
+    # active = everything executes (needs the area dialect solved):
     # command: ["python", "-m", "bugnav.runner", "--config", "config.json", "--mode", "active"]

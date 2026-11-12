@@ -30,3 +30,25 @@ class TestPosixTz(unittest.TestCase):
         self.assertEqual(_posix_tz(-5.0), "LOC+5")   # UTC-5
         self.assertEqual(_posix_tz(0.0), "LOC0")
         self.assertEqual(_posix_tz(5.5), "LOC-5:30")  # fractional
+
+
+class TestCommandExecutable(unittest.TestCase):
+    def test_mode_matrix(self):
+        from bugnav.model import CommandKind
+        from bugnav.runner import command_executable
+        for kind in CommandKind:
+            self.assertFalse(command_executable(kind, "observe"))
+            self.assertTrue(command_executable(kind, "active"))
+        # supervised: the safety chain is real, navigation is not.
+        self.assertTrue(command_executable(
+            CommandKind.PAUSE, "supervised"))
+        self.assertTrue(command_executable(
+            CommandKind.STOP, "supervised"))
+        self.assertTrue(command_executable(
+            CommandKind.RETURN_TO_DOCK, "supervised"))
+        self.assertTrue(command_executable(
+            CommandKind.RESUME_AUTO, "supervised"))
+        self.assertTrue(command_executable(
+            CommandKind.PLAY_SOUND, "supervised"))
+        self.assertFalse(command_executable(
+            CommandKind.CLEAN_AREA, "supervised"))

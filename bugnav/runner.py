@@ -1,10 +1,14 @@
 """Daemon entry point.
 
 Modes:
-  observe - connect, sample, run the controller, but NEVER send commands
-            to the robot. Everything the controller *would* do is logged.
-            This is the mode for the first on-robot verification week.
-  active  - commands are executed on the robot.
+  observe    - connect, sample, run the controller, but NEVER send
+               commands to the robot.  Everything the controller
+               *would* do is logged.
+  supervised - the safety chain executes (pause / stop / return /
+               resume / alert sound - state commands the firmware
+               accepts), while CLEAN_AREA navigation stays shadow:
+               firmware 1.61.0 rejects script-issued area commands.
+  active     - all commands are executed on the robot.
 
 Usage:
   ECOVACS_PASSWORD=... python -m bugnav.runner --config config.json --mode observe
@@ -37,6 +41,27 @@ from .network import (
 def _load_json(path: str) -> dict:
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def command_executable(kind: CommandKind, mode: str) -> bool:
+    """Which commands a mode may actually send to the robot.
+
+    observe: none - everything is shadow.  active: all.
+    supervised: everything EXCEPT CLEAN_AREA - the safety chain
+    (pause, stop, return-to-dock, resume, alert sound) runs on
+    state commands this firmware accepts (long verified), while
+    script-issued area commands are still rejected by firmware
+    1.61.0 (20011), so the controller's navigation stays shadow
+    until that dialect is solved.  A daemon whose stop decisions
+    never reach the robot is the worst of both worlds (live case
+    2026-11-12: a stop verdict changed nothing on the robot, which
+    later hung itself on a chair frame and had to be rescued by
+    hand)."""
+    if mode == "active":
+        return True
+    if mode == "supervised":
+        return kind != CommandKind.CLEAN_AREA
+    return False
 
 
 def _posix_tz(offset_hours: float) -> str:
@@ -230,6 +255,7 @@ async def _main_async(cfg_path: str, mode: str) -> None:
         "review_task": None,
         "charge_target": None,  # resume at this battery % (one-shot)
         "session_stopped": False,
+        "stop_requested": False,
         "awaiting_until": None,   # ask_user: monotonic deadline
         "awaiting_since": 0.0,
         "awaiting_from": None,    # robot state when the ask began
@@ -279,7 +305,7 @@ async def _main_async(cfg_path: str, mode: str) -> None:
         for cmd in cmds:
             if cmd.kind == CommandKind.NOTIFY:
                 log(f"NOTIFY: {cmd.message}")
-            elif mode == "active":
+            elif command_executable(cmd.kind, mode):
                 try:
                     await adapter.execute(cmd, log)
                 except Exception as exc:  # never crash the daemon
@@ -289,7 +315,7 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                     else:
                         log(f"command {cmd.kind} failed: {exc}")
             else:
-                log(f"[observe] would send {cmd.kind} {cmd.point or ''}")
+                log(f"[{mode}] would send {cmd.kind} {cmd.point or ''}")
 
     async def service_consult(req) -> None:
         plan = None
@@ -348,6 +374,10 @@ async def _main_async(cfg_path: str, mode: str) -> None:
             charge_model=charge_model, home_set=home_cells,
             blocked_m2=blocked_m2,
             charge_history=watch.charge_history())
+        if state["stop_requested"]:
+            # A stop was already decided (and sent, in executable
+            # modes); the robot just has not ended the bout yet.
+            digest["stop_already_requested"] = True
         verdict = sup_mod.Verdict()
         try:
             text = await llm_mod.chat(sup_mod.build_messages(digest))
@@ -386,28 +416,46 @@ async def _main_async(cfg_path: str, mode: str) -> None:
             state["awaiting_since"] = time.monotonic()
             state["awaiting_from"] = sample.state
             state["charge_target"] = None
-            if mode == "active" and sample.state == RobotState.CLEANING:
+            if (command_executable(CommandKind.PAUSE, mode)
+                    and sample.state == RobotState.CLEANING):
                 await dispatch([Command(CommandKind.PAUSE)])
-            elif mode != "active":
+            elif not command_executable(CommandKind.PAUSE, mode):
                 log("[observe] supervisor would pause and ask the user")
         elif verdict.action == "abandon_current":
-            if mode == "active":
-                await dispatch(controller.force_abandon(sample))
-            else:
-                log("[observe] supervisor would abandon current episode")
+            # dispatch applies the mode filter per command kind:
+            # in observe/supervised the area commands land as
+            # would-send lines, in active they execute.
+            await dispatch(controller.force_abandon(sample))
         elif verdict.action == "stop_session":
-            log(f"NOTIFY: supervisor stopping session: "
-                f"{verdict.message or verdict.reason}")
-            state["session_stopped"] = True
-            if mode == "active":
-                # Stop cleaning AND send it home: a bare STOP leaves
-                # the robot sitting wherever it was; the user rule is
-                # "abnormal -> back to the station, do not keep going".
-                await dispatch([Command(CommandKind.STOP),
-                                Command(CommandKind.RETURN_TO_DOCK)])
+            # A stop REQUEST, not a stop FACT.  The old code latched
+            # session_stopped here - in observe nothing was ever
+            # sent, yet the daemon believed its own shadow, stopped
+            # feeding the controller and the supervisor, and watched
+            # nothing while the robot cleaned on for 75 minutes and
+            # hung itself on a chair frame (live case 2026-11-12).
+            # Supervision now ends only when the bout is OBSERVED
+            # to end (see the bout transitions in the main loop).
+            if state["stop_requested"]:
+                log("supervisor reaffirms stop_session (already "
+                    "requested; supervision continues)")
+                if command_executable(CommandKind.STOP, mode):
+                    # Re-send in case the first attempt was lost.
+                    await dispatch([Command(CommandKind.STOP),
+                                    Command(CommandKind.RETURN_TO_DOCK)])
             else:
-                log("[observe] supervisor would stop the session "
-                    "and return it to the dock")
+                log(f"NOTIFY: supervisor stopping session: "
+                    f"{verdict.message or verdict.reason}")
+                state["stop_requested"] = True
+                if command_executable(CommandKind.STOP, mode):
+                    # Stop cleaning AND send it home: a bare STOP
+                    # leaves the robot sitting wherever it was; the
+                    # user rule is "abnormal -> back to the station,
+                    # do not keep going".
+                    await dispatch([Command(CommandKind.STOP),
+                                    Command(CommandKind.RETURN_TO_DOCK)])
+                else:
+                    log("[observe] supervisor would stop the session "
+                        "and return it to the dock")
         # Charge decision: an explicit verdict override wins; otherwise
         # adopt the deterministic solver's proposal from a charge review.
         if watch.charge_review_pending or plan is not None:
@@ -579,9 +627,24 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                            water_amount=adapter.water_amount)
                 if state["bout_was_open"] and not watch.bout_open:
                     _maintain_home_cache()
+                    if state["stop_requested"]:
+                        # Only NOW is the requested stop a fact:
+                        # the bout observably ended.
+                        state["stop_requested"] = False
+                        state["session_stopped"] = True
+                        log("stop confirmed: the robot has ended "
+                            "the session")
+                if watch.bout_open and not state["bout_was_open"]:
+                    # A physically new bout gets fresh supervision;
+                    # latches from the previous one are history.
+                    state["session_stopped"] = False
+                    state["stop_requested"] = False
                 state["bout_was_open"] = watch.bout_open
-                if not state["session_stopped"]:
-                    await dispatch(controller.tick(sample))
+                # The safety layer watches the physical robot
+                # whenever it cleans - a stop REQUEST (which the
+                # robot may never have received, or may fail to
+                # complete) never mutes it.
+                await dispatch(controller.tick(sample))
                 # episode strategist servicing
                 req = controller.pending_consult
                 if (advisor_on and req is not None
@@ -609,7 +672,8 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                         state["charge_target"] = None
                         log(f"charge target reached ({adapter.battery_pct}% "
                             f">= {target}%); resuming clean")
-                        if mode == "active":
+                        if command_executable(CommandKind.RESUME_AUTO,
+                                               mode):
                             await dispatch(
                                 [Command(CommandKind.RESUME_AUTO)])
                         else:
@@ -641,21 +705,29 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                             "window -> end session")
                     elif time.monotonic() > state["awaiting_until"]:
                         state["awaiting_until"] = None
-                        state["session_stopped"] = True
+                        # Same rule as a verdict stop: a REQUEST
+                        # until the bout is observed to end.
+                        state["stop_requested"] = True
                         state["charge_target"] = None
-                        log("NOTIFY: 等待选择超时（5 分钟无反馈），"
-                            "已按默认回站结束本场清扫")
-                        if mode == "active" and frm != RobotState.DOCKED:
-                            await dispatch(
-                                [Command(CommandKind.STOP),
-                                 Command(CommandKind.RETURN_TO_DOCK)])
+                        if command_executable(CommandKind.STOP, mode):
+                            log("NOTIFY: 等待选择超时（5 分钟无反馈），"
+                                "已按默认回站结束本场清扫")
+                            if frm != RobotState.DOCKED:
+                                await dispatch(
+                                    [Command(CommandKind.STOP),
+                                     Command(CommandKind.RETURN_TO_DOCK)])
+                        else:
+                            log("NOTIFY: 等待选择超时（5 分钟无反馈）；"
+                                "observe 模式未实际下发回站命令")
         await asyncio.sleep(0.5)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config.json")
-    ap.add_argument("--mode", choices=["observe", "active"], default="observe")
+    ap.add_argument("--mode",
+                    choices=["observe", "supervised", "active"],
+                    default="observe")
     args = ap.parse_args()
     try:
         asyncio.run(_main_async(args.config, args.mode))
