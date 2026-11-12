@@ -46,6 +46,9 @@ from .detector import (
     PerimeterConfig,
     PerimeterDetector,
     PerimeterEvent,
+    RammingConfig,
+    RammingDetector,
+    RammingEvent,
     StruggleDetector,
 )
 from .geometry import Point, angle_of, polar, quantize_heading
@@ -112,6 +115,7 @@ class ControllerConfig:
     backtrack_spacing_m: float = 0.45
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     perimeter: PerimeterConfig = field(default_factory=PerimeterConfig)
+    ramming: RammingConfig = field(default_factory=RammingConfig)
     # User-settled model (2026-11-11): no waiting for the firmware to
     # circle first - an obstacle encounter goes straight into the
     # along-edge logic, in every scenario; where there is a gap, dive
@@ -146,6 +150,7 @@ class BugNavController:
         self.cfg = config or ControllerConfig()
         self.detector = StruggleDetector(self.cfg.detector)
         self.perimeter = PerimeterDetector(self.cfg.perimeter)
+        self.ramming = RammingDetector(self.cfg.ramming)
         # Centres already taken over via the perimeter trigger this
         # session (a chair moves; nothing here outlives the session).
         self._perimeter_handled: list[Point] = []
@@ -183,6 +188,7 @@ class BugNavController:
         self._trapped_pos: Point | None = None
         self._blacklist: list[tuple[Point, float]] = []  # (centre, expiry t)
         self._cooldown_until = 0.0
+        self._consult_pos: Point | None = None
         self._error_pause_sent = False
         # Strategy-advisor state (per episode)
         self.pending_consult: ConsultRequest | None = None
@@ -207,22 +213,60 @@ class BugNavController:
         if self.phase == Phase.MONITOR:
             cmds = self._tick_monitor(sample)
         elif self.phase == Phase.CONSULT:
-            # Robot is paused; we only wait for the advisor's answer.
-            # On timeout, fall back to exactly what the fixed strategy
-            # would have done - the advisor can never wedge the robot.
+            # The consult rests on an observation: the robot is
+            # paused where we left it.  If the stream shows it
+            # cleaning again well away from that spot - our pause
+            # never landed, or the user resumed it - the premise is
+            # gone: cancel the episode and go back to monitoring at
+            # once instead of sitting out the timeout while the
+            # robot works unsupervised (user rule 2026-11-12:
+            # handling follows the data stream, never the commands
+            # we believe we sent).  A late advisor answer then
+            # no-ops in apply_consult_result.
             if (
+                sample.state == RobotState.CLEANING
+                and self._consult_pos is not None
+                and sample.pos.distance_to(self._consult_pos) > 0.6
+            ):
+                self.pending_consult = None
+                self._consult_pos = None
+                self._cluster = None
+                self._goal = None
+                self._pending_target = None
+                self._detour_goal = None
+                self._detour_origin = None
+                self._detour_escape_mode = False
+                self._bt_start_dist = None
+                self.trail.unfreeze()
+                self.phase = Phase.MONITOR
+                cmds = [Command(
+                    CommandKind.NOTIFY,
+                    message=(
+                        "advisor consult cancelled: the robot is "
+                        "cleaning again away from the paused spot "
+                        "(pause did not hold, or it was resumed) - "
+                        "episode dropped, monitoring resumed"))]
+            elif (
                 self.pending_consult is not None
                 and sample.t - self.pending_consult.t >= self.cfg.consult_timeout_s
             ):
+                # On timeout, fall back to exactly what the fixed
+                # strategy would have done - the advisor can never
+                # wedge the robot.
                 cmds = self._consult_fallback(sample)
             else:
                 cmds = []
         elif self.phase == Phase.COOLDOWN:
+            # Cooldown is bookkeeping only (it spaces out episode
+            # accounting); it must NOT blind the detectors.  A fresh
+            # struggle / ramming / loiter pattern that forms while
+            # the timer runs is handled exactly as in MONITOR - the
+            # detectors' own windows and positional latches provide
+            # the settle time, and the user's rule is that handling
+            # follows the data, not the episode we just closed.
             if sample.t >= self._cooldown_until:
                 self.phase = Phase.MONITOR
-                self.detector.reset()
-            else:
-                self.trail.record(sample)
+            cmds = self._tick_monitor(sample)
         else:
             cmds = self._tick_episode(sample)
         return cmds
@@ -270,6 +314,9 @@ class BugNavController:
                 approach_heading_deg=sample.heading_deg or 0.0,
             )
         if event is None:
+            rev = self.ramming.feed(sample)
+            if rev is not None:
+                return self._on_ramming_event(sample, rev)
             pe = self.perimeter.feed(sample)
             if pe is not None:
                 return self._on_perimeter_event(sample, pe)
@@ -282,6 +329,43 @@ class BugNavController:
         if approach is None:
             approach = event.approach_heading_deg
         return self._begin_episode(sample, event.centre, approach)  # type: ignore[arg-type]
+
+    def _on_ramming_event(
+        self, sample: Sample, event: RammingEvent
+    ) -> list[Command]:
+        centre = event.centre  # type: ignore[assignment]
+        cluster = self.clusters.find_or_create(centre)
+        # Same map gate as every other trigger (user rule
+        # 2026-11-12): a face the map confirms as the edge of the
+        # cleanable area is a wall, not a climb target - no
+        # episode, the firmware's own edge handling continues.
+        is_wall, arc = wall_by_map(
+            centre, self._footprint,
+            cluster.radius_m + self.cfg.wall_probe_extra_m,
+            self.cfg.wall_min_outside_arc_deg)
+        if is_wall:
+            return [Command(
+                CommandKind.NOTIFY,
+                message=(
+                    f"repeated charging at {centre} confirmed as a "
+                    f"wall by the map edge (never-cleaned arc "
+                    f"{arc:.0f} deg around it); no episode"))]
+        approach = self._free_heading
+        if approach is None:
+            approach = event.approach_heading_deg
+        return self._begin_episode(
+            sample,
+            centre,
+            approach,
+            cluster=cluster,
+            notify_text=(
+                f"repeated hard charging at {centre}: "
+                f"{event.charges} runs into the same face, mean "
+                f"run-up {event.mean_leg_m:.2f} m - pausing the "
+                "climb attempt and taking over with along-edge "
+                f"exploration (map edge arc {arc:.0f} deg: not a "
+                "wall)"),
+        )
 
     def _on_perimeter_event(
         self, sample: Sample, event: PerimeterEvent
@@ -663,6 +747,7 @@ class BugNavController:
     def _enter_consult(self, sample: Sample, kind: str) -> list[Command]:
         self._consults_used += 1
         self.phase = Phase.CONSULT
+        self._consult_pos = sample.pos
         self.pending_consult = ConsultRequest(
             kind=kind, situation=self._situation(kind, sample), t=sample.t)
         return [
@@ -916,9 +1001,14 @@ class BugNavController:
 
     def _end_episode(self, sample: Sample) -> None:
         self.trail.unfreeze()
-        self.detector.reset()
-        self.perimeter.reset()
+        # The detectors are NOT reset here (user rule 2026-11-12):
+        # ending an episode must not wipe the observation windows -
+        # a pattern already forming elsewhere has to stay visible.
+        # Their latches are positional, so the spot just handled
+        # stays suppressed until the robot leaves it, with no
+        # global blind window.
         self.pending_consult = None
+        self._consult_pos = None
         self._detour_goal = None
         self._detour_origin = None
         self._detour_escape_mode = False
