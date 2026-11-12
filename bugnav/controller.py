@@ -88,6 +88,18 @@ class ControllerConfig:
     staging_clearance_m: float = 0.50  # staging ring distance from cluster edge
     goal_depth_m: float = 0.55  # goal = first hit + approach dir * this
     arrival_tol_m: float = 0.24
+    # During a transit leg (retreat / heading to a staging point) the
+    # robot may pass right by the goal - e.g. skirting a large
+    # obstacle's edge it crosses the opening's mouth.  Coming within
+    # this distance of the goal abandons the transit and dives at
+    # the goal from here instead of completing the leg to a point
+    # somewhere else first.  Large clusters only: their staging
+    # ring is wide, transits are long and a far-side staging point
+    # can be effectively unreachable, while around a small obstacle
+    # every staging point is a short hop away and the rotation
+    # samples all sides quickly anyway.
+    goal_opportunistic_radius_m: float = 0.50
+    goal_opportunistic_min_cluster_m: float = 0.80
     staging_timeout_s: float = 45.0
     goal_timeout_s: float = 35.0
     retreat_timeout_s: float = 45.0
@@ -518,6 +530,29 @@ class BugNavController:
             if self.phase != Phase.BACKTRACK:
                 self._start_backtrack(sample)
                 return cmds
+
+        if (
+            self.phase in (Phase.RETREAT, Phase.TO_STAGING)
+            and self._goal is not None
+            and self._cluster is not None
+            and self._cluster.radius_m
+            >= self.cfg.goal_opportunistic_min_cluster_m
+            and sample.pos.distance_to(self._goal)
+            <= self.cfg.goal_opportunistic_radius_m
+        ):
+            # Passing the goal's mouth in transit: the opening is
+            # here - dive now instead of completing this leg to a
+            # staging point elsewhere (and possibly timing out on a
+            # route that crosses the obstacle).
+            if sample.pos.distance_to(self._goal) <= self.cfg.arrival_tol_m:
+                cmds.extend(self._episode_success(sample, circumnavigated=False))
+            else:
+                self.phase = Phase.TO_GOAL
+                self._pending_target = self._goal
+                self._deadline = sample.t + self.cfg.goal_timeout_s
+                self.detector.reset()
+                cmds.append(Command(CommandKind.MOVE_TO, point=self._goal))
+            return cmds
 
         arrived = (
             self._pending_target is not None
