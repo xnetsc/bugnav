@@ -447,10 +447,13 @@ class DeebotAdapter:
         clean_cls = CleanV2 if self.cfg.clean_command_v2 else Clean
         if cmd.kind == CommandKind.PAUSE:
             await _exec(clean_cls(CleanAction.PAUSE))
+            log("sent pause")
         elif cmd.kind == CommandKind.STOP:
             await _exec(clean_cls(CleanAction.STOP))
+            log("sent stop")
         elif cmd.kind == CommandKind.RESUME_AUTO:
             await _exec(clean_cls(CleanAction.START))
+            log("sent resume (auto clean start)")
         elif cmd.kind == CommandKind.RETURN_TO_DOCK:
             from deebot_client.commands.json import Charge
 

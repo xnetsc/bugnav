@@ -260,11 +260,13 @@ while it was down.
   including AI calibrations), `charge_history.json` (raw charge
   trajectories), `stats.json` (cross-session stuck statistics).
 - Modes: observe by default (read-only, shadow verdicts);
-  supervised is the middle step - the safety chain (pause / stop /
-  return / resume / alert sound, all state commands the firmware
-  accepts) executes for real while area-command navigation stays
-  shadow (this firmware rejects script-issued area commands);
-  active executes everything and needs the area dialect solved.
+  supervised is the middle step - only supervisor-issued safety
+  commands (verdict stop / return, ask-user pause, charge resume)
+  execute for real; everything the navigation controller emits,
+  its pauses included, stays shadow (a navigation pause without
+  its area moves would park the robot mid-room, and this firmware
+  rejects script-issued area commands anyway); active executes
+  everything and needs the area dialect solved.
 
 Quick start:
 

@@ -38,17 +38,17 @@ class TestCommandExecutable(unittest.TestCase):
         from bugnav.runner import command_executable
         for kind in CommandKind:
             self.assertFalse(command_executable(kind, "observe"))
+            self.assertFalse(command_executable(
+                kind, "observe", executive=True))
             self.assertTrue(command_executable(kind, "active"))
-        # supervised: the safety chain is real, navigation is not.
-        self.assertTrue(command_executable(
-            CommandKind.PAUSE, "supervised"))
-        self.assertTrue(command_executable(
-            CommandKind.STOP, "supervised"))
-        self.assertTrue(command_executable(
-            CommandKind.RETURN_TO_DOCK, "supervised"))
-        self.assertTrue(command_executable(
-            CommandKind.RESUME_AUTO, "supervised"))
-        self.assertTrue(command_executable(
-            CommandKind.PLAY_SOUND, "supervised"))
-        self.assertFalse(command_executable(
-            CommandKind.CLEAN_AREA, "supervised"))
+            self.assertTrue(command_executable(
+                kind, "active", executive=True))
+            # supervised: controller-originated commands NEVER
+            # execute (a landed episode pause with shadow moves
+            # parks the robot); supervisor-originated ones do,
+            # except area commands.
+            self.assertFalse(command_executable(kind, "supervised"))
+            self.assertEqual(
+                command_executable(kind, "supervised",
+                                   executive=True),
+                kind != CommandKind.CLEAN_AREA)

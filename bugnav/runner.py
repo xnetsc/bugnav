@@ -43,24 +43,26 @@ def _load_json(path: str) -> dict:
         return json.load(f)
 
 
-def command_executable(kind: CommandKind, mode: str) -> bool:
+def command_executable(kind: CommandKind, mode: str, *,
+                       executive: bool = False) -> bool:
     """Which commands a mode may actually send to the robot.
 
     observe: none - everything is shadow.  active: all.
-    supervised: everything EXCEPT CLEAN_AREA - the safety chain
-    (pause, stop, return-to-dock, resume, alert sound) runs on
-    state commands this firmware accepts (long verified), while
+    supervised: only the SUPERVISOR's safety chain executes
+    (executive=True call sites: verdict stop / ask-user pause /
+    charge resume / ask-timeout return), and never CLEAN_AREA -
     script-issued area commands are still rejected by firmware
-    1.61.0 (20011), so the controller's navigation stays shadow
-    until that dialect is solved.  A daemon whose stop decisions
-    never reach the robot is the worst of both worlds (live case
-    2026-11-12: a stop verdict changed nothing on the robot, which
-    later hung itself on a chair frame and had to be rescued by
-    hand)."""
+    1.61.0 (20011).  Everything the navigation controller emits
+    stays shadow in supervised, including its PAUSEs: its flows
+    pair every pause with area moves, so executing the pause alone
+    parks the robot mid-room while the controller grinds through
+    shadow angles (live incident 2026-11-12 09:26 - the robot sat
+    paused in the middle of the floor).  Origin, not just kind,
+    decides."""
     if mode == "active":
         return True
     if mode == "supervised":
-        return kind != CommandKind.CLEAN_AREA
+        return executive and kind != CommandKind.CLEAN_AREA
     return False
 
 
@@ -254,7 +256,6 @@ async def _main_async(cfg_path: str, mode: str) -> None:
         "consult_task": None,
         "review_task": None,
         "charge_target": None,  # resume at this battery % (one-shot)
-        "session_stopped": False,
         "stop_requested": False,
         "awaiting_until": None,   # ask_user: monotonic deadline
         "awaiting_since": 0.0,
@@ -301,11 +302,12 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                 os.remove(candidate_path)
             log("NOTIFY: 新布局已连续出现两场，全屋面积基准已按新布局重建")
 
-    async def dispatch(cmds) -> None:
+    async def dispatch(cmds, *, executive: bool = False) -> None:
         for cmd in cmds:
             if cmd.kind == CommandKind.NOTIFY:
                 log(f"NOTIFY: {cmd.message}")
-            elif command_executable(cmd.kind, mode):
+            elif command_executable(cmd.kind, mode,
+                                     executive=executive):
                 try:
                     await adapter.execute(cmd, log)
                 except Exception as exc:  # never crash the daemon
@@ -416,43 +418,52 @@ async def _main_async(cfg_path: str, mode: str) -> None:
             state["awaiting_since"] = time.monotonic()
             state["awaiting_from"] = sample.state
             state["charge_target"] = None
-            if (command_executable(CommandKind.PAUSE, mode)
+            if (command_executable(CommandKind.PAUSE, mode,
+                                    executive=True)
                     and sample.state == RobotState.CLEANING):
-                await dispatch([Command(CommandKind.PAUSE)])
-            elif not command_executable(CommandKind.PAUSE, mode):
+                await dispatch([Command(CommandKind.PAUSE)],
+                               executive=True)
+            elif not command_executable(CommandKind.PAUSE, mode,
+                                         executive=True):
                 log("[observe] supervisor would pause and ask the user")
         elif verdict.action == "abandon_current":
             # dispatch applies the mode filter per command kind:
             # in observe/supervised the area commands land as
             # would-send lines, in active they execute.
-            await dispatch(controller.force_abandon(sample))
+            await dispatch(controller.force_abandon(sample),
+                           executive=True)
         elif verdict.action == "stop_session":
             # A stop REQUEST, not a stop FACT.  The old code latched
-            # session_stopped here - in observe nothing was ever
-            # sent, yet the daemon believed its own shadow, stopped
-            # feeding the controller and the supervisor, and watched
-            # nothing while the robot cleaned on for 75 minutes and
-            # hung itself on a chair frame (live case 2026-11-12).
-            # Supervision now ends only when the bout is OBSERVED
-            # to end (see the bout transitions in the main loop).
+            # a session_stopped flag here - in observe nothing was
+            # ever sent, yet the daemon believed its own shadow,
+            # stopped feeding the controller and the supervisor, and
+            # watched nothing while the robot cleaned on for 75
+            # minutes and hung itself on a chair frame (live case
+            # 2026-11-12).  The latch is gone entirely: reviews and
+            # control follow the live message stream, and this flag
+            # only dedupes the notification.
             if state["stop_requested"]:
                 log("supervisor reaffirms stop_session (already "
                     "requested; supervision continues)")
-                if command_executable(CommandKind.STOP, mode):
+                if command_executable(CommandKind.STOP, mode,
+                                       executive=True):
                     # Re-send in case the first attempt was lost.
                     await dispatch([Command(CommandKind.STOP),
-                                    Command(CommandKind.RETURN_TO_DOCK)])
+                                    Command(CommandKind.RETURN_TO_DOCK)],
+                                   executive=True)
             else:
                 log(f"NOTIFY: supervisor stopping session: "
                     f"{verdict.message or verdict.reason}")
                 state["stop_requested"] = True
-                if command_executable(CommandKind.STOP, mode):
+                if command_executable(CommandKind.STOP, mode,
+                                       executive=True):
                     # Stop cleaning AND send it home: a bare STOP
                     # leaves the robot sitting wherever it was; the
                     # user rule is "abnormal -> back to the station,
                     # do not keep going".
                     await dispatch([Command(CommandKind.STOP),
-                                    Command(CommandKind.RETURN_TO_DOCK)])
+                                    Command(CommandKind.RETURN_TO_DOCK)],
+                                   executive=True)
                 else:
                     log("[observe] supervisor would stop the session "
                         "and return it to the dock")
@@ -629,15 +640,18 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                     _maintain_home_cache()
                     if state["stop_requested"]:
                         # Only NOW is the requested stop a fact:
-                        # the bout observably ended.
+                        # the bout observably ended.  Bookkeeping
+                        # only - nothing is latched off (user rule
+                        # 2026-11-12: as long as messages keep
+                        # coming, everything keeps being handled;
+                        # a command that may not have landed never
+                        # mutes control or supervision).
                         state["stop_requested"] = False
-                        state["session_stopped"] = True
                         log("stop confirmed: the robot has ended "
                             "the session")
                 if watch.bout_open and not state["bout_was_open"]:
-                    # A physically new bout gets fresh supervision;
-                    # latches from the previous one are history.
-                    state["session_stopped"] = False
+                    # A physically new bout: the previous bout's
+                    # stop request is history.
                     state["stop_requested"] = False
                 state["bout_was_open"] = watch.bout_open
                 # The safety layer watches the physical robot
@@ -652,8 +666,10 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                              or state["consult_task"].done())):
                     state["consult_task"] = asyncio.create_task(
                         service_consult(req))
-                # session supervisor servicing
-                if (supervisor_on and not state["session_stopped"]
+                # session supervisor servicing - never latched
+                # off: the watch's own due() is the only gate, and
+                # it follows the live bout, not past verdicts.
+                if (supervisor_on
                         and state["awaiting_until"] is None
                         and watch.due()
                         and (state["review_task"] is None
@@ -673,9 +689,10 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                         log(f"charge target reached ({adapter.battery_pct}% "
                             f">= {target}%); resuming clean")
                         if command_executable(CommandKind.RESUME_AUTO,
-                                               mode):
+                                               mode, executive=True):
                             await dispatch(
-                                [Command(CommandKind.RESUME_AUTO)])
+                                [Command(CommandKind.RESUME_AUTO)],
+                                executive=True)
                         else:
                             log("[observe] would resume clean now")
                 # ask_user resolution: the user's own hand on the
@@ -700,7 +717,9 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                             "window -> continue cleaning")
                     elif user_end:
                         state["awaiting_until"] = None
-                        state["session_stopped"] = True
+                        # The user's own hand ended it - an observed
+                        # fact, not a latch: supervision of any later
+                        # bout is unaffected.
                         log("user choice: sent home during the ask "
                             "window -> end session")
                     elif time.monotonic() > state["awaiting_until"]:
@@ -709,13 +728,15 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                         # until the bout is observed to end.
                         state["stop_requested"] = True
                         state["charge_target"] = None
-                        if command_executable(CommandKind.STOP, mode):
+                        if command_executable(CommandKind.STOP, mode,
+                                               executive=True):
                             log("NOTIFY: 等待选择超时（5 分钟无反馈），"
                                 "已按默认回站结束本场清扫")
                             if frm != RobotState.DOCKED:
                                 await dispatch(
                                     [Command(CommandKind.STOP),
-                                     Command(CommandKind.RETURN_TO_DOCK)])
+                                     Command(CommandKind.RETURN_TO_DOCK)],
+                                    executive=True)
                         else:
                             log("NOTIFY: 等待选择超时（5 分钟无反馈）；"
                                 "observe 模式未实际下发回站命令")
