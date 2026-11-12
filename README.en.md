@@ -69,10 +69,12 @@ operations → verification checklist → rollback), in Chinese:
   (long path, large cumulative turn, small net displacement) triggers
   takeover into wall-following on first occurrence, before it turns
   into a struggle. But the map confirms first: a spot at the edge of
-  the known cleanable area (a wide never-cleaned arc around it) is a
-  wall/corner - a straight edge has no inside to dive into, so no
-  gap-hunt episode; only interior obstacles are treated as shaped
-  furniture with a possible opening.
+  the historically swept area (a wide never-cleaned arc around it)
+  is a wall/corner - a straight edge has no inside to dive into, so
+  no gap-hunt episode; a collision point ringed by floor swept in
+  the past is definitely not a wall. The reference is the ever-swept
+  cell set (persisted separately, updated in real time as cleaning
+  proceeds), not the supervisor's conservative home-area baseline.
 - **Layered memory**: a surrendered spot is blacklisted only for the
   current session (TTL) and cleared when the session ends — chairs
   move, so nothing is ever hardened into a permanent no-go zone.

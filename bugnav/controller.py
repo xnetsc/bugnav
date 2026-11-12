@@ -149,10 +149,10 @@ class BugNavController:
         # Centres already taken over via the perimeter trigger this
         # session (a chair moves; nothing here outlives the session).
         self._perimeter_handled: list[Point] = []
-        # Known cleanable footprint (0.5 m cell keys), pushed by
-        # the runner (home baseline + this bout's cells).  Used
-        # ONLY to confirm walls by the map edge (see mapedge.py);
-        # empty = no map evidence = nothing is a wall.
+        # Ever-swept footprint (0.5 m cell keys), pushed by the
+        # runner: every cell ever observed cleaned, updated live.
+        # Used ONLY to confirm walls by the map edge (see
+        # mapedge.py); empty = no map evidence = nothing is a wall.
         self._footprint: set[tuple[int, int]] = set()
         self.trail = BreadcrumbTrail()
         self.clusters = ClusterManager()
@@ -198,8 +198,8 @@ class BugNavController:
 
     # ------------------------------------------------------------- public
     def set_footprint(self, cells: set[tuple[int, int]]) -> None:
-        """The runner pushes the known cleanable footprint (home
-        baseline + this bout's cells) for map-edge wall checks."""
+        """The runner pushes the ever-swept footprint (history,
+        live-updated) for map-edge wall checks."""
         self._footprint = set(cells)
 
     def tick(self, sample: Sample) -> list[Command]:

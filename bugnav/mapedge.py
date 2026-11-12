@@ -9,9 +9,15 @@ edge must not be treated as a wall: an interior obstacle is
 furniture, possibly a shape with an opening worth diving into,
 and the pocket logic applies.
 
-The footprint is the union of every cell ever observed cleaned
-(home baseline + the current bout), on the shared 0.5 m grid
-(cell keys are (round(x/0.5), round(y/0.5)), as in supervisor.py).
+The footprint is the ever-swept set: every cell ever observed
+cleaned, in any bout, updated in real time as new cells are
+swept (user rule 2026-11-12: "swept" means swept in history,
+and the map must stay live).  It is deliberately NOT the
+supervisor's adopted home baseline - that estimate is
+conservative and lags; a collision point ringed by historically
+swept floor is not a wall whatever the baseline says.  Grid:
+shared 0.5 m cells, keys (round(x/0.5), round(y/0.5)), as in
+supervisor.py.
 """
 
 import math

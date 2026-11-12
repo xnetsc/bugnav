@@ -218,6 +218,23 @@ async def _main_async(cfg_path: str, mode: str) -> None:
     candidate_cells: set[tuple[int, int]] | None = (
         _load_cells(candidate_path)
         if os.path.exists(candidate_path) else None)
+    # The wall-confirmation map is the EVER-SWEPT footprint: every
+    # cell the robot has ever been observed cleaning, in any past
+    # bout, updated live from the sample stream (user rule
+    # 2026-11-12: "swept" means swept in HISTORY, and it must be
+    # updated in real time).  Deliberately separate from the
+    # adopted home baseline above: that one is a conservative area
+    # estimate for planning math and only changes after two
+    # consistent bouts, so it lags reality - a spot ringed by
+    # historically swept floor is not a wall no matter what the
+    # baseline currently says.  The swept set only ever grows.
+    swept_path = os.path.join(data_dir, "swept_cells.json")
+    swept_cells: set[tuple[int, int]] = (
+        _load_cells(swept_path) if os.path.exists(swept_path)
+        else set())
+    # Seed from every record of historically swept area already
+    # kept (adopted baseline + candidate layout), then stay live.
+    swept_cells |= home_cells | set(candidate_cells or set())
     model_path = os.path.join(data_dir, "charge_model.json")
     charge_model = ChargeModel()
     if os.path.exists(model_path):
@@ -257,7 +274,7 @@ async def _main_async(cfg_path: str, mode: str) -> None:
         "review_task": None,
         "charge_target": None,  # resume at this battery % (one-shot)
         "stop_requested": False,
-        "footprint_len": -1,
+        "swept_saved_at": 0.0,
         "awaiting_until": None,   # ask_user: monotonic deadline
         "awaiting_since": 0.0,
         "awaiting_from": None,    # robot state when the ask began
@@ -639,6 +656,7 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                            water_amount=adapter.water_amount)
                 if state["bout_was_open"] and not watch.bout_open:
                     _maintain_home_cache()
+                    _save_cells(swept_path, swept_cells)
                     if state["stop_requested"]:
                         # Only NOW is the requested stop a fact:
                         # the bout observably ended.  Bookkeeping
@@ -655,13 +673,18 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                     # stop request is history.
                     state["stop_requested"] = False
                 state["bout_was_open"] = watch.bout_open
-                # Keep the controller's map current: the known
-                # cleanable footprint (home baseline + this bout)
-                # is what confirms walls by the map edge.
-                footprint = home_cells | watch.cells
-                if len(footprint) != state["footprint_len"]:
-                    state["footprint_len"] = len(footprint)
-                    controller.set_footprint(footprint)
+                # Live-update the ever-swept map with this very
+                # sample and hand it to the controller: a cell
+                # swept once - in any bout, ever - counts from
+                # that moment on.
+                cell = (round(sample.pos.x / sup_mod.CELL_M),
+                        round(sample.pos.y / sup_mod.CELL_M))
+                if cell not in swept_cells:
+                    swept_cells.add(cell)
+                    controller.set_footprint(swept_cells)
+                    if wall - state["swept_saved_at"] > 30.0:
+                        state["swept_saved_at"] = wall
+                        _save_cells(swept_path, swept_cells)
                 # The safety layer watches the physical robot
                 # whenever it cleans - a stop REQUEST (which the
                 # robot may never have received, or may fail to
