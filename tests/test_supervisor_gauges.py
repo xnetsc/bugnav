@@ -1,6 +1,6 @@
 """Rolling drain / ETA / virtual water gauge tests.
 
-User requirements pinned here:
+Requirements pinned here:
   * LIVE rolling consumption (recent ~15 min), not just bout averages;
   * a projected finish time that includes the charge cycles implied by
     the remaining energy shortfall;
