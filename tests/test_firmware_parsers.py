@@ -104,3 +104,46 @@ class TestP2PLifeSpanTolerance(unittest.TestCase):
 
         cmd = ResetLifeSpan.create_from_mqtt({"type": "brush"})
         self.assertEqual(cmd._args, {"type": "brush"})
+
+
+class TestMapSetNoiseFilter(unittest.TestCase):
+    """The firmware permanently answers getMapSet with 20003; the
+    library's per-dispatch 'Could not parse getMapSet' warnings
+    (tracebacks included) are pure noise and get filtered, while
+    every other library record must still pass."""
+
+    @staticmethod
+    def _record(logger_name, msg, args=()):
+        import logging
+
+        return logging.LogRecord(logger_name, logging.WARNING,
+                                 __file__, 1, msg, args, None)
+
+    def _filters_of(self, logger_name):
+        import logging
+
+        from bugnav.firmware_parsers import _UnsupportedMapSetFilter
+
+        return [f for f in logging.getLogger(logger_name).filters
+                if isinstance(f, _UnsupportedMapSetFilter)]
+
+    def test_filter_attached_to_both_library_loggers(self):
+        self.assertEqual(len(self._filters_of("deebot_client.message")), 1)
+        self.assertEqual(len(self._filters_of("deebot_client.command")), 1)
+
+    def test_getmapset_warning_dropped(self):
+        f = self._filters_of("deebot_client.message")[0]
+        rec = self._record("deebot_client.message",
+                           "Could not parse %s: %s",
+                           ("getMapSet", {"code": 20003}))
+        self.assertFalse(f.filter(rec))
+
+    def test_other_records_pass(self):
+        f = self._filters_of("deebot_client.message")[0]
+        other_parse = self._record("deebot_client.message",
+                                   "Could not parse %s: %s",
+                                   ("getPos", {"code": 1}))
+        self.assertTrue(f.filter(other_parse))
+        unrelated = self._record("deebot_client.message",
+                                 "connection lost, retrying")
+        self.assertTrue(f.filter(unrelated))

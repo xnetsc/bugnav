@@ -25,6 +25,13 @@ spamming a traceback on every refresh (observed live 2026-11-11):
   2026-11-11 with a mirrored resetLifeSpan for 'cleaningSolution',
   dropped with a traceback.  The converter gets a LifeSpan-only
   fallback that hands back a value-carrying stand-in.
+* getMapSet: this firmware permanently answers 20003 ("rcp not
+  support") - map sets are simply unreadable here (verified during
+  the 2026-11-11 map probes).  The library retries it on every
+  map-related dispatch route and logs "Could not parse getMapSet"
+  with a full traceback each time (bursts observed live 2026-11-12
+  at connect).  A logging filter drops exactly that record; every
+  other library warning still shows.
 
 The patch replaces the two handler classmethods on the library's own
 command classes, so every dispatch route (message registry, legacy
@@ -34,6 +41,7 @@ class objects) picks it up.  Idempotent.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import TYPE_CHECKING, Any
 
@@ -141,6 +149,36 @@ def _install_tolerant_p2p_lifespan() -> None:
     command_mod._pop_or_raise = tolerant
 
 
+class _UnsupportedMapSetFilter(logging.Filter):
+    """Drop the library's getMapSet parse warnings - and only those.
+
+    The firmware answers getMapSet with 20003 on every dispatch
+    route, so each answer is one "Could not parse getMapSet" warning
+    (the message-dispatch ones carry a full traceback).  Map sets
+    being unreadable is a settled fact about this firmware, not a
+    malfunction worth a log line; all other records pass."""
+
+    _bugnav_filter = True
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        return not message.startswith("Could not parse getMapSet")
+
+
+def _install_log_filters() -> None:
+    """Attach the getMapSet noise filter to the two library loggers
+    that emit it (message dispatch and command responses).
+    Idempotent."""
+    for name in ("deebot_client.message", "deebot_client.command"):
+        logger = logging.getLogger(name)
+        if any(getattr(f, "_bugnav_filter", False) for f in logger.filters):
+            continue
+        logger.addFilter(_UnsupportedMapSetFilter())
+
+
 def install_tolerant_parsers() -> None:
     """Replace the two strict handlers with the tolerant ones."""
     from deebot_client.commands.json.life_span import GetLifeSpan
@@ -149,3 +187,4 @@ def install_tolerant_parsers() -> None:
     GetWaterInfo._handle_body_data_dict = classmethod(_tolerant_water_info)
     GetLifeSpan._handle_body_data_list = classmethod(_tolerant_life_span)
     _install_tolerant_p2p_lifespan()
+    _install_log_filters()
