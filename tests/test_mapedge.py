@@ -102,3 +102,71 @@ class TestPerimeterGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSweptHistoryBinding(unittest.TestCase):
+    """History is bound to a specific map (user rule 2026-11-12):
+    a venue change is a map change; another map's swept cells
+    must never leak into this map's wall judgments."""
+
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.mkdtemp()
+
+    def test_maps_keep_separate_histories(self):
+        from bugnav.mapedge import SweptHistory
+        h = SweptHistory(self.dir)
+        self.assertTrue(h.activate("111"))
+        h.add((1, 1))
+        h.add((2, 2))
+        self.assertTrue(h.activate("222"))
+        self.assertEqual(h.cells, set())  # new map, clean slate
+        h.add((9, 9))
+        self.assertTrue(h.activate("111"))
+        self.assertEqual(h.cells, {(1, 1), (2, 2)})  # its own past
+        self.assertFalse(h.activate("111"))  # no change, no swap
+
+    def test_legacy_unbound_file_adopted_by_first_map_only(self):
+        import json
+        import os
+        with open(os.path.join(self.dir, "swept_cells.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({"cells": [[5, 5]]}, f)
+        from bugnav.mapedge import SweptHistory
+        h = SweptHistory(self.dir)
+        h.activate("111")
+        self.assertEqual(h.cells, {(5, 5)})
+        h.activate("222")
+        self.assertEqual(h.cells, set())
+
+    def test_cells_before_first_binding_are_kept(self):
+        from bugnav.mapedge import SweptHistory
+        h = SweptHistory(self.dir)
+        h.add((3, 3))  # gathered before the map id was read
+        h.activate("111")
+        self.assertIn((3, 3), h.cells)
+
+    def test_seed_only_when_no_records_exist(self):
+        from bugnav.mapedge import SweptHistory
+        h = SweptHistory(self.dir)
+        h.activate("111", seed={(7, 7)})
+        self.assertEqual(h.cells, {(7, 7)})
+
+
+class TestParseMapId(unittest.TestCase):
+    def _raw(self, infos):
+        return {"resp": {"body": {"data": {"info": infos}}}}
+
+    def test_built_map_wins(self):
+        from bugnav.deebot_adapter import parse_map_id
+        raw = self._raw([{"mid": "111", "built": 0},
+                         {"mid": "222", "built": 1}])
+        self.assertEqual(parse_map_id(raw), "222")
+
+    def test_fallback_last_and_garbage(self):
+        from bugnav.deebot_adapter import parse_map_id
+        self.assertEqual(parse_map_id(self._raw([{"mid": "333"}])),
+                         "333")
+        self.assertIsNone(parse_map_id(None))
+        self.assertIsNone(parse_map_id({"resp": {}}))
+        self.assertIsNone(parse_map_id(self._raw([{"mid": "0"}])))

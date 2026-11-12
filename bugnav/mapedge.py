@@ -20,7 +20,9 @@ shared 0.5 m cells, keys (round(x/0.5), round(y/0.5)), as in
 supervisor.py.
 """
 
+import json
 import math
+import os
 
 from .geometry import Point
 
@@ -64,3 +66,87 @@ def wall_by_map(centre: Point, footprint: set, radius_m: float,
     CONFIRMED by the map edge, never assumed)."""
     arc = outside_arc_deg(centre, footprint, radius_m)
     return (arc >= min_outside_arc_deg, arc)
+
+
+class SweptHistory:
+    """Ever-swept cells, bound to ONE map at a time (user rule
+    2026-11-12: the history must be bound to a specific map - a
+    venue change IS a map change, and the same coordinates under
+    another map are another place).  One file per map id;
+    activate() saves the old map's set before loading the new
+    one's, so returning to a map resumes its own history."""
+
+    def __init__(self, data_dir: str):
+        self._dir = data_dir
+        self.mid: str | None = None
+        self.cells: set[tuple[int, int]] = set()
+
+    @staticmethod
+    def _key(mid: str) -> str:
+        return "".join(
+            c if (c.isalnum() or c in "-_") else "_" for c in str(mid))
+
+    def _path(self, mid: str) -> str:
+        return os.path.join(
+            self._dir, f"swept_cells_{self._key(mid)}.json")
+
+    @property
+    def _legacy_path(self) -> str:
+        return os.path.join(self._dir, "swept_cells.json")
+
+    def _any_keyed_file(self) -> bool:
+        try:
+            return any(fn.startswith("swept_cells_")
+                       and fn.endswith(".json")
+                       for fn in os.listdir(self._dir))
+        except OSError:
+            return False
+
+    @staticmethod
+    def _load(path: str) -> set:
+        try:
+            with open(path, encoding="utf-8") as f:
+                return {tuple(c) for c in json.load(f)["cells"]}
+        except Exception:  # noqa: BLE001 - a lost file is just empty
+            return set()
+
+    def activate(self, mid: str, seed: set | None = None) -> bool:
+        """Bind the history to `mid`.  Returns True when the bound
+        map actually changed (first activation included).  Cells
+        gathered before any binding (the brief window before the
+        first map-id read) are kept: the physical map in use
+        during that window is the one being bound."""
+        mid = str(mid)
+        if mid == self.mid:
+            return False
+        pending = self.cells if self.mid is None else set()
+        self.save()
+        self.mid = mid
+        path = self._path(mid)
+        if os.path.exists(path):
+            self.cells = self._load(path)
+        elif (os.path.exists(self._legacy_path)
+              and not self._any_keyed_file()):
+            # Pre-keying builds kept one unbound file; it was
+            # accumulated on the then-current map, so the FIRST
+            # map bound under keying adopts it - and only that
+            # map: once any keyed file exists, the legacy file
+            # can never seed another map's history.
+            self.cells = self._load(self._legacy_path)
+        else:
+            self.cells = set(seed or set())
+        self.cells |= pending
+        return True
+
+    def save(self) -> None:
+        if self.mid is None:
+            return
+        os.makedirs(self._dir, exist_ok=True)
+        with open(self._path(self.mid), "w", encoding="utf-8") as f:
+            json.dump({"cells": sorted(self.cells)}, f)
+
+    def add(self, cell: tuple[int, int]) -> bool:
+        if cell in self.cells:
+            return False
+        self.cells.add(cell)
+        return True

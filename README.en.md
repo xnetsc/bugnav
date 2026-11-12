@@ -75,6 +75,9 @@ operations → verification checklist → rollback), in Chinese:
   the past is definitely not a wall. The reference is the ever-swept
   cell set (persisted separately, updated in real time as cleaning
   proceeds), not the supervisor's conservative home-area baseline.
+  It is bound per map: each map keeps its own history, a venue
+  change is a map change, coordinates never carry across maps, and
+  a switch swaps the history (with a notification).
 - **Layered memory**: a surrendered spot is blacklisted only for the
   current session (TTL) and cleared when the session ends — chairs
   move, so nothing is ever hardened into a permanent no-go zone.

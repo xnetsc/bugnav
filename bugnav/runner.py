@@ -30,6 +30,7 @@ from . import strategist, supervisor as sup_mod
 from .chargeplan import ChargeModel, plan_resume
 from .controller import BugNavController, ControllerConfig
 from .deebot_adapter import AdapterConfig, DeebotAdapter
+from .mapedge import SweptHistory
 from .model import Command, CommandKind, RobotState
 from .network import (
     LinkWatchdog,
@@ -219,22 +220,14 @@ async def _main_async(cfg_path: str, mode: str) -> None:
         _load_cells(candidate_path)
         if os.path.exists(candidate_path) else None)
     # The wall-confirmation map is the EVER-SWEPT footprint: every
-    # cell the robot has ever been observed cleaning, in any past
-    # bout, updated live from the sample stream (user rule
-    # 2026-11-12: "swept" means swept in HISTORY, and it must be
-    # updated in real time).  Deliberately separate from the
-    # adopted home baseline above: that one is a conservative area
-    # estimate for planning math and only changes after two
-    # consistent bouts, so it lags reality - a spot ringed by
-    # historically swept floor is not a wall no matter what the
-    # baseline currently says.  The swept set only ever grows.
-    swept_path = os.path.join(data_dir, "swept_cells.json")
-    swept_cells: set[tuple[int, int]] = (
-        _load_cells(swept_path) if os.path.exists(swept_path)
-        else set())
-    # Seed from every record of historically swept area already
-    # kept (adopted baseline + candidate layout), then stay live.
-    swept_cells |= home_cells | set(candidate_cells or set())
+    # cell the robot has ever been observed cleaning, updated live
+    # (user rule 2026-11-12) - and BOUND TO A SPECIFIC MAP: a
+    # venue change is a map change, and the same coordinates under
+    # another map are another place, so each map keeps its own
+    # history (see mapedge.SweptHistory).  Deliberately separate
+    # from the adopted home baseline above: that is a conservative
+    # area estimate for planning math, not a swept record.
+    history = SweptHistory(data_dir)
     model_path = os.path.join(data_dir, "charge_model.json")
     charge_model = ChargeModel()
     if os.path.exists(model_path):
@@ -573,6 +566,33 @@ async def _main_async(cfg_path: str, mode: str) -> None:
         f"advisor={'on' if advisor_on else 'off'}, "
         f"supervisor={'on' if supervisor_on else 'off'}")
 
+    async def _sync_map_history(*, first: bool = False) -> None:
+        """Bind the ever-swept history to the robot's CURRENT map
+        (user rule 2026-11-12: history belongs to a specific map;
+        a venue change is a map change).  Runs at startup, after
+        reconnects, and at every bout start - the only moments
+        the active map can have changed.  A failed read changes
+        nothing."""
+        mid = await adapter.current_map_id(log)
+        if mid is None:
+            return
+        seed = None
+        if first:
+            # The only historical records in existence were swept
+            # on the map in use when they were written - the map
+            # being bound now.
+            seed = home_cells | set(candidate_cells or set())
+        if history.activate(mid, seed=seed):
+            controller.set_footprint(history.cells)
+            if first:
+                log(f"swept history bound to map {mid}: "
+                    f"{len(history.cells)} cells")
+            else:
+                log(f"NOTIFY: 地图已更换（新地图 {mid}），墙判历史"
+                    f"已切换到该地图（{len(history.cells)} 格历史）")
+
+    await _sync_map_history(first=True)
+
     watchdog = LinkWatchdog()
 
     async def _reconnect(down_since: float) -> None:
@@ -595,6 +615,7 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                     f"({type(exc).__name__}); next try in {delay:.0f}s")
                 await asyncio.sleep(delay)
         _adopt_robot_clock()
+        await _sync_map_history()
         log(f"cloud link restored after "
             f"{(time.monotonic() - down_since) / 60.0:.1f} min; "
             f"monitoring resumes")
@@ -656,7 +677,7 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                            water_amount=adapter.water_amount)
                 if state["bout_was_open"] and not watch.bout_open:
                     _maintain_home_cache()
-                    _save_cells(swept_path, swept_cells)
+                    history.save()
                     if state["stop_requested"]:
                         # Only NOW is the requested stop a fact:
                         # the bout observably ended.  Bookkeeping
@@ -670,8 +691,11 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                             "the session")
                 if watch.bout_open and not state["bout_was_open"]:
                     # A physically new bout: the previous bout's
-                    # stop request is history.
+                    # stop request is history.  A map switch in the
+                    # App can only have happened while docked, i.e.
+                    # between bouts - rebind the swept history.
                     state["stop_requested"] = False
+                    await _sync_map_history()
                 state["bout_was_open"] = watch.bout_open
                 # Live-update the ever-swept map with this very
                 # sample and hand it to the controller: a cell
@@ -679,12 +703,11 @@ async def _main_async(cfg_path: str, mode: str) -> None:
                 # that moment on.
                 cell = (round(sample.pos.x / sup_mod.CELL_M),
                         round(sample.pos.y / sup_mod.CELL_M))
-                if cell not in swept_cells:
-                    swept_cells.add(cell)
-                    controller.set_footprint(swept_cells)
+                if history.add(cell):
+                    controller.set_footprint(history.cells)
                     if wall - state["swept_saved_at"] > 30.0:
                         state["swept_saved_at"] = wall
-                        _save_cells(swept_path, swept_cells)
+                        history.save()
                 # The safety layer watches the physical robot
                 # whenever it cleans - a stop REQUEST (which the
                 # robot may never have received, or may fail to

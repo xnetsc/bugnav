@@ -101,6 +101,26 @@ def parse_device_clock(header, mono_now: float):
     return (epoch_s, mono_now, tz_hours)
 
 
+def parse_map_id(raw) -> str | None:
+    """The active map's id ('mid') from a getCachedMapInfo reply:
+    the built map's mid, else the last listed one.  Swept history
+    is bound to this id - the same coordinates under another map
+    are another place entirely (user rule 2026-11-12)."""
+    try:
+        data = (((raw or {}).get("resp", {}).get("body", {}) or {})
+                .get("data", {}) or {})
+        infos = data.get("info", []) or []
+        for info in infos:
+            if info.get("built") == 1 and info.get("mid") not in (None, "0"):
+                return str(info["mid"])
+        if infos:
+            mid = infos[-1].get("mid")
+            return str(mid) if mid not in (None, "0") else None
+    except Exception:  # noqa: BLE001 - odd shapes read as "unknown"
+        return None
+    return None
+
+
 class DeebotAdapter:
     def __init__(self, cfg: AdapterConfig):
         self.cfg = cfg
@@ -418,6 +438,21 @@ class DeebotAdapter:
         )
 
     # ------------------------------------------------------------ command
+    async def current_map_id(self, log) -> str | None:
+        """The firmware's active map id, or None when unreadable
+        (callers then keep the previously bound history - a failed
+        read never rebinds anything)."""
+        if self._device is None:
+            return None
+        try:
+            from deebot_client.commands.json.map import GetCachedMapInfo
+
+            raw = await self._device.execute_command(GetCachedMapInfo())
+        except Exception as exc:  # noqa: BLE001
+            log(f"map id read failed: {exc}")
+            return None
+        return parse_map_id(raw)
+
     async def execute(self, cmd: Command, log) -> None:
         from deebot_client.commands.json.clean import (
             Clean,
