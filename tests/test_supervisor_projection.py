@@ -1,4 +1,4 @@
-"""Live-case regression, 2026-11-12: a bout that opened fast on
+"""Regression: a bout that opened fast on
 open floor, then spent ~16 min in one chair pocket.  The rolling
 window pace collapsed to ~0.2, the conservative yardstick silently
 vanished from the digest (its gate demanded rolling >= 0.25), the

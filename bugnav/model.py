@@ -38,7 +38,7 @@ class CommandKind(str, Enum):
     # the running session, and once it completes the robot sits
     # paused with nothing to resume - deebot-client even rewrites a
     # plain START into a bare resume while paused, which is then a
-    # no-op (probed live 2026-11-12: robot stayed paused 100 s).
+    # no-op (robot stayed paused 100 s).
     # The adapter sends the raw clean_V2 start form, which the
     # rewrite cannot touch; the robot starts cleaning at once.
     START_AUTO = "start_auto"

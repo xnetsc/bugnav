@@ -22,7 +22,7 @@ Strategy (settled with the user):
     and resume.
   * Second trigger, no struggle needed: if the firmware itself is
     circling one spot and passing its opening by (perimeter loiter,
-    seen live 2026-11-11 at a U-shaped chair base), that encounter
+    e.g. at a U-shaped chair base), that encounter
     starts an episode right away whose goal is the centre of the
     circled area - the pocket it never enters.  The staging-ring
     exploration then tries that goal from successive angles; where
@@ -97,13 +97,13 @@ class ControllerConfig:
     # entry corridor), not as "close enough, move on".
     backtrack_min_progress_m: float = 0.12
     # When trapped is declared, the ROBOT ITSELF must also raise the
-    # alarm (user 2026-11-11) - its built-in sound, this many times -
+    # alarm - its built-in sound, this many times -
     # not only the program's phone/Mac notification.
     trapped_sound_count: int = 3
     # A backtrack detour prefers the ORIGINAL EXIT; only after the
     # exploration has swept this much arc without regaining it does
     # the objective degrade to "leave this area by any opening"
-    # (user 2026-11-11: do not fixate on the original exit).
+    # (do not fixate on the original exit).
     detour_escape_after_sweep_deg: float = 180.0
     # Full circle on an obstacle this small = success (its perimeter is
     # then fully cleaned). Contact points sit one robot-clearance away
@@ -116,15 +116,15 @@ class ControllerConfig:
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     perimeter: PerimeterConfig = field(default_factory=PerimeterConfig)
     ramming: RammingConfig = field(default_factory=RammingConfig)
-    # User-settled model (2026-11-11): no waiting for the firmware to
-    # circle first - an obstacle encounter goes straight into the
+    # No waiting for the firmware to circle first - an obstacle
+    # encounter goes straight into the
     # along-edge logic, in every scenario; where there is a gap, dive
     # in.  A spot already taken over via this trigger is not taken over
     # again this session (the episode's own outcome - entered, or
     # abandoned and session-blacklisted - stands).
     perimeter_repeat_radius_m: float = 0.6
     # Wall confirmation comes from the MAP, not from the motion
-    # shape (user rule 2026-11-12): a loiter centre at the edge of
+    # shape: a loiter centre at the edge of
     # the known cleanable area - at least this much of the ring
     # around it (probed a bit beyond the cluster) was never
     # cleaned - IS a wall/corner and gets NO dive-in episode.
@@ -219,10 +219,10 @@ class BugNavController:
             # never landed, or the user resumed it - the premise is
             # gone: cancel the episode and go back to monitoring at
             # once instead of sitting out the timeout while the
-            # robot works unsupervised (user rule 2026-11-12:
-            # handling follows the data stream, never the commands
-            # we believe we sent).  A late advisor answer then
-            # no-ops in apply_consult_result.
+            # robot works unsupervised: handling follows the data
+            # stream, never the commands we believe we sent.  A
+            # late advisor answer then no-ops in
+            # apply_consult_result.
             if (
                 sample.state == RobotState.CLEANING
                 and self._consult_pos is not None
@@ -335,10 +335,10 @@ class BugNavController:
     ) -> list[Command]:
         centre = event.centre  # type: ignore[assignment]
         cluster = self.clusters.find_or_create(centre)
-        # Same map gate as every other trigger (user rule
-        # 2026-11-12): a face the map confirms as the edge of the
-        # cleanable area is a wall, not a climb target - no
-        # episode, the firmware's own edge handling continues.
+        # Same map gate as every other trigger: a face the map
+        # confirms as the edge of the cleanable area is a wall,
+        # not a climb target - no episode, the firmware's own
+        # edge handling continues.
         is_wall, arc = wall_by_map(
             centre, self._footprint,
             cluster.radius_m + self.cfg.wall_probe_extra_m,
@@ -395,7 +395,7 @@ class BugNavController:
         else:
             cluster = ObstacleCluster(hits=list(event.ring_points))
             self.clusters.clusters.append(cluster)
-        # Map first (user rule 2026-11-12): a bump is not
+        # Map first: a bump is not
         # automatically a gap-hunt.  If the map says this spot is
         # at the edge of the cleanable area, it is a wall/corner -
         # a straight edge has no inside to dive into, so there is
@@ -566,9 +566,9 @@ class BugNavController:
             if arrived:
                 cmds.extend(self._advance_backtrack(sample))
             else:
-                # The way out is NOT guaranteed clear (user
-                # 2026-11-11): something may have moved into the
-                # entry corridor after we came in.  Struggling en
+                # The way out is NOT guaranteed clear: something
+                # may have moved into the entry corridor after we
+                # came in.  Struggling en
                 # route, or a waypoint timing out with no real
                 # progress toward it, means the corridor is blocked
                 # NOW - detour, don't just skip the point.
@@ -872,7 +872,7 @@ class BugNavController:
         return cmds
 
     def _backtrack_blocked(self, sample: Sample) -> list[Command]:
-        """The entry corridor is blocked NOW (user 2026-11-11: never
+        """The entry corridor is blocked NOW (never
         assume the way back stayed clear).  Detour with the same
         perimeter exploration used for any obstacle - but the
         objective is LEAVING THIS AREA, not regaining one exact
@@ -939,7 +939,7 @@ class BugNavController:
         return cmds
 
     def _detour_maybe_escape(self, sample: Sample) -> list[Command]:
-        """Tier switch for a backtrack detour (user 2026-11-11):
+        """Tier switch for a backtrack detour:
         the ORIGINAL EXIT stays the preferred target; only when the
         exploration has swept a wide arc without regaining it does
         the objective degrade to 'leave this area by any opening'.
@@ -967,8 +967,8 @@ class BugNavController:
     def _detour_escaped(self, sample: Sample) -> list[Command]:
         """Out of the area through another opening: the original
         exit proved unreachable, but the robot is outside the pocket
-        and can work again - that is success enough (user
-        2026-11-11: do not fixate on the original exit)."""
+        and can work again - that is success enough; do not fixate
+        on the original exit."""
         cmds = [
             Command(CommandKind.NOTIFY, message=(
                 "original exit unreachable; left this area by another "
@@ -979,9 +979,9 @@ class BugNavController:
         return cmds
 
     def _declare_trapped(self, sample: Sample, why: str) -> list[Command]:
-        """Exploration has PROVEN there is no way out (user
-        2026-11-11): stop, stay put, and raise the alarm for a
-        human.  Grinding on would only drain the battery."""
+        """Exploration has PROVEN there is no way out: stop, stay
+        put, and raise the alarm for a human.  Grinding on would
+        only drain the battery."""
         self._trapped_pos = sample.pos
         self._detour_goal = None
         cmds = [
@@ -1001,7 +1001,7 @@ class BugNavController:
 
     def _end_episode(self, sample: Sample) -> None:
         self.trail.unfreeze()
-        # The detectors are NOT reset here (user rule 2026-11-12):
+        # The detectors are NOT reset here :
         # ending an episode must not wipe the observation windows -
         # a pattern already forming elsewhere has to stay visible.
         # Their latches are positional, so the spot just handled

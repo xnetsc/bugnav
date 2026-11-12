@@ -1,6 +1,6 @@
 """Transient network failures on the Ecovacs cloud link are
 classified, logged as one line and retried at a paced backoff -
-never a traceback, never a storm (user 2026-11-11)."""
+never a traceback, never a storm."""
 
 import asyncio
 import socket

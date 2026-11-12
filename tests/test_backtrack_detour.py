@@ -1,4 +1,4 @@
-"""Backtrack is not a blind replay (user 2026-11-11):
+"""Backtrack is not a blind replay:
 
 * the entry corridor may be blocked by something NEW on the way out;
   blockage (struggle, or a waypoint timing out with no progress)
@@ -92,7 +92,7 @@ class TestBacktrackDetour(unittest.TestCase):
         self.assertIn(CommandKind.PAUSE, _kinds(cmds))
         self.assertNotIn(CommandKind.START_AUTO, _kinds(cmds))
         # The robot itself must sound the alarm too, not only the
-        # program's notification (user 2026-11-11).
+        # program's notification.
         sounds = [c for c in cmds if c.kind == CommandKind.PLAY_SOUND]
         self.assertEqual(len(sounds), 1)
         self.assertEqual(sounds[0].count, 3)

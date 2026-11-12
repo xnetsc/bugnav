@@ -1,8 +1,8 @@
 """The supervisor's clock strings must follow cfg.tz_offset_hours,
-never the process-local zone (regression: 2026-11-11 the container's
-UTC clock made the judge read 11:01 local as 03:00 'deep night' and
-stop a morning session).  These assertions hold under ANY machine
-TZ because the code must not consult localtime at all."""
+never the process-local zone: with a UTC container clock, local
+rendering would hand the judge 03:00 for an 11:01 household morning
+and invite a bogus 'deep night' stop.  These assertions hold under
+ANY machine TZ because the code must not consult localtime at all."""
 
 import unittest
 
@@ -62,8 +62,8 @@ if __name__ == "__main__":
 
 class TestPrecomputedTimes(unittest.TestCase):
     """The judge receives READY-MADE time differences, never raw
-    clock pairs it would have to subtract itself (user 2026-11-11:
-    给 AI 时要给算好的时间，不要让 AI 算时间)."""
+    clock pairs it would have to subtract itself
+    （给 AI 时要给算好的时间，不要让 AI 算时间）。"""
 
     def test_span_over_normal_is_precomputed(self):
         from bugnav.model import Point, RobotState, Sample

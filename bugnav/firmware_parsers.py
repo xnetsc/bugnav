@@ -2,7 +2,7 @@
 
 The pinned deebot-client (11.1.0b2) predates this firmware's payload
 shapes, and its strict parsers die on them - losing the data AND
-spamming a traceback on every refresh (observed live 2026-11-11):
+spamming a traceback on every refresh :
 
 * getWaterInfo: b2 unconditionally reads data["amount"], but this
   firmware reports the water level as a CUSTOM amount and has no
@@ -21,17 +21,16 @@ spamming a traceback on every refresh (observed live 2026-11-11):
 * resetLifeSpan over MQTT p2p: commands other clients send are
   mirrored to every client and rebuilt by
   CommandMqttP2P.create_from_mqtt, whose argument conversion raises
-  DeebotError on the same unknown LifeSpan values - observed live
-  2026-11-11 with a mirrored resetLifeSpan for 'cleaningSolution',
-  dropped with a traceback.  The converter gets a LifeSpan-only
-  fallback that hands back a value-carrying stand-in.
+  DeebotError on the same unknown LifeSpan values - a mirrored
+  resetLifeSpan for 'cleaningSolution' is dropped with a traceback.
+  The converter gets a LifeSpan-only fallback that hands back a
+  value-carrying stand-in.
 * getMapSet: this firmware permanently answers 20003 ("rcp not
-  support") - map sets are simply unreadable here (verified during
-  the 2026-11-11 map probes).  The library retries it on every
-  map-related dispatch route and logs "Could not parse getMapSet"
-  with a full traceback each time (bursts observed live 2026-11-12
-  at connect).  A logging filter drops exactly that record; every
-  other library warning still shows.
+  support") - map sets are simply unreadable here.  The library
+  retries it on every map-related dispatch route and logs "Could
+  not parse getMapSet" with a full traceback each time.  A logging
+  filter drops exactly that record; every other library warning
+  still shows.
 
 The patch replaces the two handler classmethods on the library's own
 command classes, so every dispatch route (message registry, legacy

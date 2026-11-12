@@ -1,11 +1,8 @@
 """Daemon entry point.
 
 Connects to the robot, samples it, runs the controller and the
-supervisor, and EXECUTES their commands on the robot.  There is no
-shadow mode: a command this daemon decides on is sent, or it is
-not issued at all (user rule 2026-11-12: 不该发的东西不该存在 -
-the observe/supervised would-send split was removed the day the
-firmware's mapPoint movement command was proven live).
+supervisor, and EXECUTES their commands on the robot: a command
+this daemon decides on is sent.
 
 Usage:
   ECOVACS_PASSWORD=... python -m bugnav.runner --config config.json
@@ -45,8 +42,8 @@ def _posix_tz(offset_hours: float) -> str:
     """A POSIX TZ string for a UTC offset (e.g. +8 -> 'LOC-8'):
     the POSIX value is what you ADD to local time to get UTC, the
     negation of the usual offset.  Built from the robot-reported
-    offset at runtime - no zone is hardcoded anywhere (user
-    2026-11-11: 容器启动时自动探测时区，不要写死)."""
+    offset at runtime - no zone is hardcoded anywhere
+    （容器启动时自动探测时区，不要写死）。"""
     total_min = int(round(-offset_hours * 60))
     sign = "-" if total_min < 0 else "+"
     hh, mm = divmod(abs(total_min), 60)
@@ -65,7 +62,7 @@ def log_stamp(device_epoch: float | None,
     Log timestamps must come from the same computed time everything
     else uses, never from the process-local clock: a container
     without TZ configured printed UTC stamps next to verdicts that
-    (correctly) reasoned in local time (user 2026-11-11: 改为计算
+    (correctly) reasoned in local time (改为计算
     后的时间做时间戳打印)."""
     if device_epoch is None:
         return None
@@ -103,8 +100,8 @@ async def _main_async(cfg_path: str) -> None:
     # their monotonic instant and stamped retroactively on the
     # robot's timeline once the basis exists (device_now_at projects
     # backwards) - so no zone needs to be preset anywhere for the
-    # startup lines to come out in household time either (user
-    # 2026-11-11: 自动探测、不要写死).  If no header ever arrives
+    # startup lines to come out in household time either
+    # （自动探测、不要写死）。  If no header ever arrives
     # (connect failure), the buffer flushes with the container-local
     # fallback instead of being lost.
     pending_stamps: list[tuple[float, str]] = []
@@ -173,7 +170,7 @@ async def _main_async(cfg_path: str) -> None:
     # are folded in at bout end when they match it; a mismatching bout
     # (new map / other home / different rooms) is stashed as a
     # candidate and adopted only when the new layout repeats, so a
-    # one-off trip never poisons the denominator (user 2026-11-11).
+    # one-off trip never poisons the denominator .
     home_path = os.path.join(data_dir, "home_cells.json")
     candidate_path = os.path.join(data_dir, "home_candidate.json")
 
@@ -195,7 +192,7 @@ async def _main_async(cfg_path: str) -> None:
         if os.path.exists(candidate_path) else None)
     # The wall-confirmation map is the EVER-SWEPT footprint: every
     # cell the robot has ever been observed cleaning, updated live
-    # (user rule 2026-11-12) - and BOUND TO A SPECIFIC MAP: a
+    #  - and BOUND TO A SPECIFIC MAP: a
     # venue change is a map change, and the same coordinates under
     # another map are another place, so each map keeps its own
     # history (see mapedge.SweptHistory).  Deliberately separate
@@ -382,7 +379,7 @@ async def _main_async(cfg_path: str) -> None:
             log(f"NOTIFY: supervisor: {verdict.message}")
         elif (verdict.action == "ask_user"
                 and sample.state != RobotState.RETURNING):
-            # Hand the decision to the user (user 2026-11-11): pause,
+            # Hand the decision to the user: pause,
             # notify with the choices, and wait ask_timeout_s.  The
             # user's own hand resolves it - resume (button/app) means
             # continue, sending it home means end; NO feedback within
@@ -401,14 +398,12 @@ async def _main_async(cfg_path: str) -> None:
         elif verdict.action == "abandon_current":
             await dispatch(controller.force_abandon(sample))
         elif verdict.action == "stop_session":
-            # A stop REQUEST, not a stop FACT.  The old code latched
-            # a session_stopped flag here - in observe nothing was
-            # ever sent, yet the daemon believed its own shadow,
-            # stopped feeding the controller and the supervisor, and
-            # watched nothing while the robot cleaned on for 75
-            # minutes and hung itself on a chair frame (live case
-            # 2026-11-12).  The latch is gone entirely: reviews and
-            # control follow the live message stream, and this flag
+            # A stop REQUEST, not a stop FACT.  There is
+            # deliberately no session_stopped latch here: a latch
+            # would make the daemon believe its own command, stop
+            # feeding the controller and the supervisor, and watch
+            # nothing while the robot cleans on.  Reviews and
+            # control follow the live message stream; this flag
             # only dedupes the notification.
             if state["stop_requested"]:
                 log("supervisor reaffirms stop_session (already "
@@ -422,7 +417,7 @@ async def _main_async(cfg_path: str) -> None:
                 state["stop_requested"] = True
                 # Stop cleaning AND send it home: a bare STOP
                 # leaves the robot sitting wherever it was; the
-                # user rule is "abnormal -> back to the station,
+                # rule is "abnormal -> back to the station,
                 # do not keep going".
                 await dispatch([Command(CommandKind.STOP),
                                 Command(CommandKind.RETURN_TO_DOCK)])
@@ -437,7 +432,7 @@ async def _main_async(cfg_path: str) -> None:
                 # (short_cycle_thrashing + segments) and the verdict
                 # above already weighed it.  No hardcoded floor here -
                 # what to do about it is the supervisor's conclusion,
-                # not code's (user 2026-11-11: 不要写死).
+                # not code's (不要写死).
                 log("short-cycle thrash pattern present; resume "
                     "level left to the supervisor verdict")
             if target is not None and verdict.action == "continue":
@@ -485,9 +480,10 @@ async def _main_async(cfg_path: str) -> None:
         """Wall clock for everything the AI (or the user, via a
         notification) reads as 'now': the ROBOT's own time - its
         response-header timestamp projected on the monotonic clock.
-        The host's wall clock is never the basis (user 2026-11-11:
-        AI 的时钟以扫地机自己上报的时间为准，不可以写死).  Falls
-        back to the host clock only until the first header lands."""
+        The host's wall clock is never the basis
+        （AI 的时钟以扫地机自己上报的时间为准，不可以写死）。
+        Falls back to the host clock only until the first header
+        lands."""
         dn = adapter.device_now()
         return dn if dn is not None else time.time()
 
@@ -516,7 +512,7 @@ async def _main_async(cfg_path: str) -> None:
 
     async def _sync_map_history(*, first: bool = False) -> None:
         """Bind the ever-swept history to the robot's CURRENT map
-        (user rule 2026-11-12: history belongs to a specific map;
+        (history belongs to a specific map;
         a venue change is a map change).  Runs at startup, after
         reconnects, and at every bout start - the only moments
         the active map can have changed.  A failed read changes
@@ -546,8 +542,8 @@ async def _main_async(cfg_path: str) -> None:
     async def _reconnect(down_since: float) -> None:
         """Re-establish the cloud link, retrying indefinitely at a
         paced backoff - the daemon must come back on its own when
-        the network returns, however long the outage lasted (user
-        2026-11-11: 需要维持重试，网络恢复后可以恢复).  Unlike
+        the network returns, however long the outage lasted
+        （需要维持重试，网络恢复后可以恢复）。  Unlike
         startup, ANY failure is retried here: a login token that
         expired mid-outage is healed by the fresh login this
         performs, and the 60s cap keeps it a reasonable frequency."""
@@ -629,11 +625,10 @@ async def _main_async(cfg_path: str) -> None:
                     if state["stop_requested"]:
                         # Only NOW is the requested stop a fact:
                         # the bout observably ended.  Bookkeeping
-                        # only - nothing is latched off (user rule
-                        # 2026-11-12: as long as messages keep
-                        # coming, everything keeps being handled;
-                        # a command that may not have landed never
-                        # mutes control or supervision).
+                        # only - nothing is latched off: as long as
+                        # messages keep coming, everything keeps
+                        # being handled; a command that may not have
+                        # landed never mutes control or supervision.
                         state["stop_requested"] = False
                         log("stop confirmed: the robot has ended "
                             "the session")
@@ -694,8 +689,8 @@ async def _main_async(cfg_path: str) -> None:
                             [Command(CommandKind.RESUME_AUTO)])
                 # ask_user resolution: the user's own hand on the
                 # robot (or in the app) is the answer; silence for
-                # ask_timeout_s defaults to return-and-end (user
-                # 2026-11-11: 5 minutes, no feedback -> 回站结束).
+                # ask_timeout_s defaults to return-and-end
+                # (5 minutes, no feedback -> 回站结束).
                 if state["awaiting_until"] is not None:
                     waited = time.monotonic() - state["awaiting_since"]
                     frm = state["awaiting_from"]

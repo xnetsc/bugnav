@@ -1,6 +1,6 @@
-"""Tolerant parsers for the T80S fw 1.61.0 payload shapes, using the
-EXACT payloads captured live on 2026-11-11 (the pinned library's
-strict parsers died on both), plus the LLM JSON-mode payload."""
+"""Tolerant parsers for the T80S fw 1.61.0 payload shapes, using
+EXACT captured payloads (the pinned library's strict parsers died
+on both), plus the LLM JSON-mode payload."""
 
 import sys
 import unittest
@@ -90,8 +90,8 @@ if __name__ == "__main__":
 
 class TestP2PLifeSpanTolerance(unittest.TestCase):
     """A mirrored resetLifeSpan naming a consumable newer than the
-    pinned enum (live capture 2026-11-11: 'cleaningSolution') must
-    reconstruct instead of dying in create_from_mqtt."""
+    pinned enum (e.g. 'cleaningSolution') must reconstruct instead
+    of dying in create_from_mqtt."""
 
     def test_unknown_lifespan_reconstructs(self):
         from deebot_client.commands.json.life_span import ResetLifeSpan

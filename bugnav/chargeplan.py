@@ -1,6 +1,6 @@
 """Charge planning: minimize TOTAL elapsed time of a cleaning bout.
 
-Objective (user-settled): cleaning time + charging time + per-charge
+Objective: cleaning time + charging time + per-charge
 overheads, summed, must be minimal - a 07:00 task must not still be
 running at 20:00 because it kept charging to a fixed threshold.
 
@@ -73,7 +73,7 @@ def expected_total_minutes(planned_m2: float, model: ChargeModel,
     when the battery forces it, plus per-cycle overheads.
 
     This is the yardstick the supervisor's reasonableness judgment
-    hangs on (user 2026-11-11): 'too long' is measured against the
+    hangs on: 'too long' is measured against the
     time the PLANNED AREA should take at a reasonable speed - never
     against a hardcoded hour count."""
     remaining = float(planned_m2)

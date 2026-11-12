@@ -35,7 +35,7 @@ def build_payload(model: str, messages: list[dict], *,
     """Chat-completions payload.  Every bugnav consumer parses the
     reply as JSON (advisor Plan, supervisor Verdict), so JSON mode is
     enforced at the API level via response_format - not merely
-    requested in the prompt (user 2026-11-11).  Both prompts do
+    requested in the prompt .  Both prompts do
     mention JSON, which json_object mode requires."""
     payload = {"model": model, "messages": messages}
     if json_mode:

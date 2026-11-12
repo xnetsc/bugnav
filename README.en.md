@@ -267,12 +267,10 @@ while it was down.
   (candidate layout), `charge_model.json` (charge parameters,
   including AI calibrations), `charge_history.json` (raw charge
   trajectories), `stats.json` (cross-session stuck statistics).
-- No modes: every command the daemon decides on is executed on
-  the robot - there is no shadow tier (the observe/supervised
-  split was removed on 2026-11-12 at the user's direction).
+- Every command the daemon decides on is executed on the robot.
   Directed movement uses clean_V2 `mapPoint`, the one movement
-  type this firmware implements (verified live); the rectangle
-  command customArea is rejected (20011) and is not used.
+  type this firmware implements; the rectangle command
+  customArea is rejected (20011) and is not used.
 
 Quick start:
 

@@ -8,38 +8,33 @@ inside a small radius, travels a non-trivial path length (it *is*
 trying), changes direction repeatedly, and makes almost no net
 progress.
 
-Perimeter loiter is the second failure shape, seen live on 2026-11-11:
-the firmware *does* walk around a U-shaped chair base, reaches the
-opening face - and then simply passes it by, because following the
-perimeter is all it knows.  That is not a struggle (the robot moves
-freely, over a wider disc, mostly turning), so the struggle detector
-rightly ignores it.  The perimeter detector watches for it instead:
-over a longer window the robot stays inside a ~0.65 m disc, travels
-several metres, and accumulates a large total turn while ending up
-about where it started.
-
-Calibration note (real 2026-11-11 session trace): this pattern also
-occurs during the firmware's normal intensive local cleaning, roughly
-ten times per hour-long session, at about seven distinct spots.  Per
-the user's settled model that does not gate anything: an obstacle
-encounter goes straight into the along-edge logic in every scenario,
-so the controller takes over on the first loiter at a spot (and only
-once per spot per session - the episode's outcome then stands).
+Perimeter loiter is the second failure shape: the firmware *does*
+walk around a U-shaped chair base, reaches the opening face - and
+then simply passes it by, because following the perimeter is all it
+knows.  That is not a struggle (the robot moves freely, over a wider
+disc, mostly turning), so the struggle detector rightly ignores it.
+The perimeter detector watches for it instead: over a longer window
+the robot stays inside a ~0.65 m disc, travels several metres, and
+accumulates a large total turn while ending up about where it
+started.  This pattern also occurs during the firmware's normal
+intensive local cleaning; that gates nothing - an obstacle encounter
+goes straight into the along-edge logic in every scenario, so the
+controller takes over on the first loiter at a spot (and only once
+per spot per session - the episode's outcome then stands).
 
 Ramming is the third shape, and the one that actually hangs wheels:
 the firmware backs off a few decimetres and charges the SAME obstacle
-face again, trying to climb over it (user report, 2026-11-12: a
-U-shaped chair base, charged frontally until a drive wheel left the
-ground).  The sawtooth escapes both detectors above - its excursions
-exceed the struggle disc and it does not circle - so it gets its own
-detector: back-and-forth legs along ONE axis, with the turn-around
-points pinned in two tight clusters (the impact face and the run-up
-end).  The user's standing rule is that this is corrected promptly:
-the moment the pattern is proven, the controller pauses the robot
-and takes over - detection must not wait for an error, and issuing
-commands never suspends detection (latches here are positional: a
-handled spot re-arms by the robot leaving it, never by a timer or by
-a command having been sent).
+face again, trying to climb over it (a U-shaped chair base, charged
+frontally until a drive wheel leaves the ground).  The sawtooth
+escapes both detectors above - its excursions exceed the struggle
+disc and it does not circle - so it gets its own detector:
+back-and-forth legs along ONE axis, with the turn-around points
+pinned in two tight clusters (the impact face and the run-up end).
+It is corrected promptly: the moment the pattern is proven, the
+controller pauses the robot and takes over - detection never waits
+for an error, and issuing commands never suspends detection
+(latches here are positional: a handled spot re-arms by the robot
+leaving it, never by a timer or by a command having been sent).
 """
 
 from __future__ import annotations
@@ -88,7 +83,7 @@ class StruggleDetector:
         while self._buf and sample.t - self._buf[0].t > win:
             self._buf.popleft()
         if self._latched_centre is not None:
-            # Positional latch (user rule 2026-11-12: handling never
+            # Positional latch (handling never
             # switches off because a command was sent - it re-arms
             # when the robot observably leaves the handled spot).
             if sample.pos.distance_to(self._latched_centre) > (

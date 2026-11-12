@@ -4,7 +4,7 @@ The daemon reaches the cloud over the household internet and the
 Mac's proxy; that path hiccups (proxy restarts, router reboots,
 cloud blips).  A dropped request must become a one-line event with
 a paced retry - never an unhandled traceback, never a dead process
-(user 2026-11-11: 网络错误要处理这个异常，保持合理频率的重试).
+(网络错误要处理这个异常，保持合理频率的重试).
 
 Pacing is deliberately gentle.  The cloud account must never see
 a login or command storm: frequent re-logins are exactly what
@@ -66,7 +66,7 @@ class LinkWatchdog:
     nothing downstream would notice.  The watchdog pings the cloud
     on a slow cadence and, after `fails_to_reconnect` consecutive
     failures, sends the runner into its reconnect loop, which keeps
-    trying until the network is back (user 2026-11-11: 需要维持
+    trying until the network is back (需要维持
     重试，网络恢复后可以恢复).  Incoming robot events count as
     contact too: while the robot is pushing positions, the link is
     proven alive and the ping is skipped."""

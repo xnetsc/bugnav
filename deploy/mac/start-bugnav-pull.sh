@@ -46,7 +46,7 @@ mkdir -p data
 docker compose pull
 docker compose up -d
 echo
-echo "== 容器已启动（observe 只读模式）。最近日志： =="
+echo "== 容器已启动。最近日志： =="
 sleep 3
 docker compose logs --tail 40 bugnav || true
 echo

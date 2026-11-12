@@ -1,7 +1,7 @@
 """Ramming (charge-and-climb) detection + the rule that handling
 follows the data stream, never the commands already sent.
 
-Live shape (user report 2026-11-12): the firmware backs off a few
+The shape: the firmware backs off a few
 decimetres and charges the same U-chair base face again and again,
 trying to climb it, until a drive wheel leaves the ground.  The
 sawtooth escapes the struggle disc (excursions too wide) and never
@@ -125,7 +125,7 @@ class TestRammingDetector(unittest.TestCase):
 
 
 class TestHandlingFollowsData(unittest.TestCase):
-    """The 2026-11-12 rule at controller level: phases entered by
+    """The rule at controller level: phases entered by
     sending commands (cooldown after hand-back, consult while
     paused) must not blind the adjustment logic."""
 

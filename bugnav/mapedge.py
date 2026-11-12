@@ -1,4 +1,4 @@
-"""Wall confirmation by the map (user rule, 2026-11-12).
+"""Wall confirmation by the map.
 
 Whether an obstacle is a WALL (a straight edge, a room corner) is
 decided by the map, not by the shape of the robot's motion: if the
@@ -11,7 +11,7 @@ and the pocket logic applies.
 
 The footprint is the ever-swept set: every cell ever observed
 cleaned, in any bout, updated in real time as new cells are
-swept (user rule 2026-11-12: "swept" means swept in history,
+swept ("swept" means swept in history,
 and the map must stay live).  It is deliberately NOT the
 supervisor's adopted home baseline - that estimate is
 conservative and lags; a collision point ringed by historically
@@ -62,17 +62,17 @@ def outside_arc_deg(centre: Point, footprint: set, radius_m: float,
 def wall_by_map(centre: Point, footprint: set, radius_m: float,
                 min_outside_arc_deg: float = 120.0) -> tuple[bool, float]:
     """(is_wall, outside_arc_deg).  With no footprint there is no
-    map evidence, so nothing is a wall (user rule: a wall must be
-    CONFIRMED by the map edge, never assumed)."""
+    map evidence, so nothing is a wall: a wall must be CONFIRMED
+    by the map edge, never assumed."""
     arc = outside_arc_deg(centre, footprint, radius_m)
     return (arc >= min_outside_arc_deg, arc)
 
 
 class SweptHistory:
-    """Ever-swept cells, bound to ONE map at a time (user rule
-    2026-11-12: the history must be bound to a specific map - a
-    venue change IS a map change, and the same coordinates under
-    another map are another place).  One file per map id;
+    """Ever-swept cells, bound to ONE map at a time: the history
+    must be bound to a specific map - a venue change IS a map
+    change, and the same coordinates under another map are another
+    place.  One file per map id;
     activate() saves the old map's set before loading the new
     one's, so returning to a map resumes its own history."""
 

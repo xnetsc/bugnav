@@ -178,11 +178,9 @@ macOS 通知中心 + 给用户本人发 iMessage（手机同步收到），launc
   `home_candidate.json`（候选布局）、`charge_model.json`（充电参
   数，含 AI 矫正结果）、`charge_history.json`（原始充电轨迹）、
   `stats.json`（跨次卡困统计）。
-- 无模式之分：守护进程下达的每条命令都真实执行，不存在影子
-  档（2026-11-12 按用户要求删除原 observe/supervised 分档）。
-  定点移动走 clean_V2 的 `mapPoint`（本固件唯一实现的定向移动
-  命令，已实机验证）；矩形区域命令 customArea 本固件拒绝
-  （20011），不用。
+- 守护进程下达的每条命令都真实执行。定点移动走 clean_V2 的
+  `mapPoint`（本固件唯一实现的定向移动命令）；矩形区域命令
+  customArea 本固件拒绝（20011），不用。
 
 快速开始：
 

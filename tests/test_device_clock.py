@@ -1,9 +1,9 @@
 """The AI's clock basis is the ROBOT's reported time + timezone
-(user 2026-11-11: 以扫地机自己上报的时间和时区为准，不可以写死).
+(以扫地机自己上报的时间和时区为准，不可以写死).
 
 parse_device_clock reads the firmware's response header ('ts' =
-device epoch ms as a string, 'tzm' = offset minutes; live capture
-2026-11-11: ts '1794374247626', tzm 480) and device_now projects
+device epoch ms as a string, 'tzm' = offset minutes; captured
+header: ts '1794374247626', tzm 480) and device_now projects
 that basis forward on the monotonic clock."""
 
 import asyncio

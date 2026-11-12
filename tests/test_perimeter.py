@@ -1,7 +1,7 @@
 """Perimeter-loiter trigger: the firmware circles an obstacle and
-passes its opening by (live case: U-shaped chair base, 2026-11-11).
+passes its opening by (example: a U-shaped chair base).
 
-User-settled model: no waiting for circling to repeat - an obstacle
+No waiting for circling to repeat - an obstacle
 encounter goes straight into the along-edge logic, goal = centre of
 the circled area (where there is a gap, dive in).  Once per spot per
 session via this trigger; the route in is remembered (breadcrumb

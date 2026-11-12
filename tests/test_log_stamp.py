@@ -1,7 +1,7 @@
 """Log-line timestamps come from the COMPUTED time (the robot's
 clock in the robot's zone); only before the first device header
 lands may the caller fall back - to the container's local time
-(user 2026-11-11: 改为计算后的时间做时间戳打印；没有取到扫地机
+(改为计算后的时间做时间戳打印；没有取到扫地机
 时间时用容器本地时间)."""
 
 import unittest

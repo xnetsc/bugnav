@@ -18,4 +18,4 @@ services:
       - ./config.json:/app/config.json:ro
       - ./data:/app/data
     # The image's default command runs the daemon; every command
-    # it decides on is executed on the robot (no shadow modes).
+    # it decides on is executed on the robot.

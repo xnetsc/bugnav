@@ -1,4 +1,4 @@
-"""Wall confirmation by the map (user rule, 2026-11-12).
+"""Wall confirmation by the map.
 
 A bump does not automatically start a gap-hunt: whether the
 obstacle is a wall is decided by the map.  At the edge of the
@@ -105,7 +105,7 @@ if __name__ == "__main__":
 
 
 class TestSweptHistoryBinding(unittest.TestCase):
-    """History is bound to a specific map (user rule 2026-11-12):
+    """History is bound to a specific map:
     a venue change is a map change; another map's swept cells
     must never leak into this map's wall judgments."""
 

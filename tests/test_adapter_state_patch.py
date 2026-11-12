@@ -2,7 +2,7 @@
 
 The T80S firmware (1.61.0) rejects getCleanInfo V1 and V2 with
 `20003 rcp not support`, so a state capability that reads work state
-from GetCleanInfoV2 never updates (observed live 2026-11-11: state
+from GetCleanInfoV2 never updates (state
 stayed "docked" through an entire cleaning run). Aliased classes get
 their state capability replaced with GetChargeState + GetWorkState,
 mirroring deebot-client's newest hardware classes.

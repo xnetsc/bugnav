@@ -4,7 +4,7 @@
 # - first run asks for the Ecovacs short ID + password (password is only
 #   written to ./.env with 600 perms, never echoed)
 # - builds and starts the container (the daemon commands the robot
-#   for real - there are no shadow modes)
+#   for real)
 set -euo pipefail
 cd "$(dirname "$0")"
 echo "== bugnav 容器部署（Mac）=="

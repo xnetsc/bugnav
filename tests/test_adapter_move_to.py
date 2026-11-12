@@ -1,5 +1,5 @@
 """MOVE_TO executes as clean_V2 mapPoint - the directed-movement
-type fw 1.61.0 actually implements (probed live 2026-11-12:
+type fw 1.61.0 actually implements (
 customArea/spotArea are rejected 20011, mapPoint returns code 0
 and the robot drives to the point, in the same raw frame GetPos
 reports)."""
@@ -59,7 +59,7 @@ class TestMoveTo(unittest.TestCase):
     def test_start_auto_sends_raw_fresh_start(self):
         # A mapPoint session leaves the robot paused with nothing
         # to resume; the stock START would be rewritten by the
-        # library into a bare resume (a no-op, probed live).  The
+        # library into a bare resume (a no-op).  The
         # adapter must send the raw start form untouched.
         adapter = _adapter()
         logs = []

@@ -27,7 +27,6 @@ Bounded verdict vocabulary (the supervisor can only ever):
   + resume_charge_pct while docked: resume at this battery level
     instead of the firmware's fixed threshold.
 It cannot invent destinations or change controller parameters.
-In observe mode verdicts are logged as shadow decisions only.
 """
 
 from __future__ import annotations
@@ -54,26 +53,26 @@ class SupervisorConfig:
     session_soft_cap_s: float = 3 * 3600.0  # beyond this, ask sooner
     # ask_user verdicts: how long to wait for the user's choice
     # (button press / app action) before the default fires - return
-    # to dock and end (user 2026-11-11: 5 minutes, no feedback).
+    # to dock and end (5 minutes, no feedback).
     ask_timeout_s: float = 300.0
     # Home timezone as a fixed UTC offset.  Every clock string fed to
     # the supervisor LLM (now / bout_started / eta_finish / ready_at)
     # is rendered with THIS offset, never the process-local clock:
-    # the container may run on UTC, and on 2026-11-11 that made the
-    # judge read 11:01 local as "03:00, deep night" and stop a
-    # morning session.  This household is UTC+8.
+    # a container running on UTC would otherwise hand the judge
+    # clock strings hours off the household's day.  This household
+    # is UTC+8.
     tz_offset_hours: float = 8.0
     episode_trigger: int = 6  # this many episodes also triggers a review
     urgent_repeat_s: float = 300.0  # min gap between cap-triggered reviews
     docked_full_pct: int = 98  # docked at/above this = bout is over
     docked_idle_close_s: float = 1800.0  # docked this long = bout over
-    # Rolling-gauge windows (user 2026-11-11: judge on LIVE consumption,
+    # Rolling-gauge windows (judge on LIVE consumption,
     # not only whole-bout averages, so a bout heading for an all-day
     # finish is caught while there is still time to act).
     rolling_window_s: float = 900.0  # ~15 min rolling drain/progress
     eta_reserve_pct: float = 8.0  # battery reserve kept in ETA maths
     eta_charge_to_pct: float = 90.0  # assumed target of future charges
-    # Virtual water gauge (user-settled 2026-11-11): the plumbed
+    # Virtual water gauge: the plumbed
     # station refills + washes on every real dock stay, so a stay of at
     # least water_reset_dock_s counts as water back to 100%.  Between
     # stays the gauge drains by spray amount x newly mopped area.  The
@@ -89,7 +88,7 @@ class SupervisorConfig:
     # duration yardsticks in the supervisor prompt.
     home_note: str = ""
     normal_session_max_s: float = 0.0
-    # Home-cache consistency (user 2026-11-11): the cached home area
+    # Home-cache consistency: the cached home area
     # is the denominator for progress / remaining / ETA.  If a bout's
     # area significantly mismatches the cache (robot taken to another
     # home, new map, different rooms), those cached figures must not
@@ -97,7 +96,7 @@ class SupervisorConfig:
     home_suspect_novel_share: float = 0.25  # >= this share of NEW cells
     home_min_cache_cells: int = 150  # cache must be mature to be judged
     home_min_bout_cells: int = 40  # bout must be substantial to judge
-    # Short-cycle charge thrashing (user 2026-11-11): charged, resumed,
+    # Short-cycle charge thrashing: charged, resumed,
     # flat again in no time, repeatedly = the resume level / drain
     # handling is broken.  A segment counts toward thrashing when it
     # started after a charge stop, ENDED at low battery (a mop-wash
@@ -166,7 +165,7 @@ class Verdict:
     reason: str = ""
     resume_charge_pct: int | None = None
     # Optional charge-model calibration FROM the raw history in the
-    # digest (user 2026-11-11: the AI corrects the parameters; code
+    # digest (the AI corrects the parameters; code
     # only validates the shape and applies them).
     charge_model_update: dict | None = None
 
@@ -207,7 +206,7 @@ class SessionWatch:
         # Raw charge history: recent dock stays with their SOC
         # trajectory marks.  Recorded faithfully and handed to the
         # supervisor LLM, which does the CALIBRATING - code invents
-        # no correction scheme of its own (user 2026-11-11).
+        # no correction scheme of its own .
         self._charge_history: deque = deque(maxlen=12)
         self._dock_stay: dict | None = None
         # Virtual water gauge state.
@@ -321,8 +320,7 @@ class SessionWatch:
                     >= self.cfg.water_reset_dock_s):
                 # A real station stay, not a pass-through touch: the
                 # plumbed station washes the mop and refills, so the
-                # virtual water gauge resets to full (user-settled rule,
-                # 2026-11-11).
+                # virtual water gauge resets to full.
                 self._water_cells = set()
                 self._water_reset_t = sample.t
                 self._water_reset_this_stay = True
@@ -476,10 +474,9 @@ class SessionWatch:
         """The whole bout's demonstrated pace: covered area over
         cleaning time.  The rolling rate prices only the CURRENT
         terrain - a robot negotiating one chair pocket shows ~0.2
-        even in a healthy bout (live case 2026-11-12: 16 min in a
-        pocket after a fast open-floor start, and the rolling-only
-        figures talked the judge into stopping a 21-minute bout
-        that finished the home in 57).  The overall pace prices the
+        even in a healthy bout, so rolling-only figures can talk
+        the judge into stopping a healthy bout early.  The overall
+        pace prices the
         bout's whole mix of open floor and obstacles, so it is the
         honest basis for projecting the REST of the home and for
         the conservative expectation."""
@@ -489,7 +486,7 @@ class SessionWatch:
         return None
 
     def pace_stalled(self) -> bool:
-        """Speed anomaly, deliberately cache-free (user 2026-11-11):
+        """Speed anomaly, deliberately cache-free :
         the rolling window passed with (almost) no NEW coverage while
         the robot kept 'cleaning'.  Needs no home total, no remaining
         area, no ETA - it is valid in a foreign home, on a new map,
@@ -501,7 +498,7 @@ class SessionWatch:
         """Split the rolling window's cleaning time into low-yield
         time (cleaning but gaining NO new cell - probing around an
         obstacle, escaping, re-cleaning; honest progress there is
-        ~zero, user 2026-11-11) and advancing time.  Returns
+        ~zero) and advancing time.  Returns
         (low_yield_share, advancing_pace_m2_per_min|None).  Pure
         measurement: what it MEANS is the supervisor's call."""
         h = self._pace_hist
@@ -538,8 +535,8 @@ class SessionWatch:
 
     def water_pct_est(self) -> float:
         """Virtual water gauge: 100 after a station wash/refill, then
-        drains by spray amount x area mopped since (user-settled model;
-        the firmware exposes no real level)."""
+        drains by spray amount x area mopped since (the firmware
+        exposes no real level)."""
         amount = self.water_amount or self.cfg.water_default_amount
         rate = self.cfg.water_rate_pct_per_m2.get(
             amount, self.cfg.water_rate_pct_per_m2[2])
@@ -566,7 +563,7 @@ class SessionWatch:
         """The home zone as a Chinese label （东八区）, for stating
         the current time AS one fact - 'the time in <zone> is HH:MM' -
         never a UTC time plus an offset the judge must combine
-        (user 2026-11-11)."""
+        ."""
         h = self.cfg.tz_offset_hours
         if h == 0:
             return "UTC"
@@ -594,7 +591,7 @@ class SessionWatch:
         time when it is ready) and how much area it buys.  A level
         that takes hours to reach can be the wrong choice even when
         it would 'guarantee' finishing - the judge needs the price
-        tag, not just the level (user 2026-11-11)."""
+        tag, not just the level ."""
         if self.battery_pct is None:
             return []
         model = model or ChargeModel()
@@ -631,7 +628,7 @@ class SessionWatch:
         # (the mix of terrain actually met); the recent window's
         # pace prices only the patch the robot is in right now and
         # becomes a labelled pessimistic bound below, never the
-        # headline ETA (live case 2026-11-12 above).
+        # headline ETA.
         recent = self.rolling_progress_m2_per_min()
         overall = self.bout_overall_pace_m2_per_min()
         progress = overall if overall is not None else recent
@@ -756,7 +753,7 @@ class SessionWatch:
             if options:
                 d["charge_options"] = options
             planned_m2 = home_cells * CELL_AREA_M2
-            # Complexity accounting (user 2026-11-11): part of the
+            # Complexity accounting: part of the
             # nominal area is obstacle footprint the robot can never
             # clean.  Expectations and coverage are judged against the
             # CLEANABLE area, not the nominal one.
@@ -778,12 +775,11 @@ class SessionWatch:
             # Conservative expectation: same cleanable area at the
             # pace this bout has demonstrated OVERALL - the mix of
             # open floor and obstacle work actually met, which is
-            # the honest speed yardstick in a cluttered home.  (Was:
-            # the ROLLING pace, gated to >=0.25 - in the 2026-11-12
-            # live case the rolling pace had collapsed to 0.2 inside
-            # a pocket, the gate silently dropped the conservative
-            # yardstick from the digest, and the judge fell back to
-            # the nominal ratio alone and stopped a healthy bout.)
+            # the honest speed yardstick in a cluttered home.  (The
+            # rolling pace is not used here: inside an obstacle
+            # pocket it collapses, and a gate on it would silently
+            # drop this yardstick from the digest exactly when the
+            # terrain is hardest.)
             expected_cons = None
             pace = self.bout_overall_pace_m2_per_min()
             if pace is None:
@@ -809,7 +805,7 @@ class SessionWatch:
                         eta["projected_total_span_min"] / expected_cons, 2)
                 if "normal_session_max_min" in d:
                     # Precomputed so the judge never subtracts clock
-                    # labels (user 2026-11-11: 给算好的时间，不要
+                    # labels (给算好的时间，不要
                     # 让 AI 算时间): signed - positive means the
                     # projected span already exceeds this household's
                     # normal-session yardstick.

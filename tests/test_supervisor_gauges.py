@@ -1,4 +1,4 @@
-"""Rolling drain / ETA / virtual water gauge tests (2026-11-11 batch).
+"""Rolling drain / ETA / virtual water gauge tests.
 
 User requirements pinned here:
   * LIVE rolling consumption (recent ~15 min), not just bout averages;
@@ -23,7 +23,7 @@ from bugnav.supervisor import (
 
 class TestReasonablenessFrame(unittest.TestCase):
     def test_prompt_carries_resume_and_routine_frame(self):
-        # User (2026-11-11): every resume is a fresh decision; judge
+        # every resume is a fresh decision; judge
         # with the current time and ordinary daily routine, not
         # duration alone - and (09:35) duration reasonableness comes
         # from the PLANNED AREA at a reasonable speed, never from a
@@ -35,7 +35,7 @@ class TestReasonablenessFrame(unittest.TestCase):
         self.assertNotIn("已是上限", SYSTEM)
 
     def test_prompt_carries_no_full_coverage_obligation(self):
-        # User (2026-11-11): after 4-5 h with most of the planned area
+        # after 4-5 h with most of the planned area
         # done, end it - no obligation to leave nothing uncleaned.
         # This judgment belongs to the LLM, fed with enough info.
         self.assertIn("不遗漏", SYSTEM)
@@ -98,7 +98,7 @@ class TestPaceStall(unittest.TestCase):
         self.assertFalse(w.pace_stalled())
 
     def test_prompt_speed_anomaly_is_cache_free(self):
-        # User (2026-11-11): a cleaning-speed anomaly has nothing to
+        # a cleaning-speed anomaly has nothing to
         # do with total area; it must be judged at all times, even
         # when the map cache is absent or mismatched.
         self.assertIn("与总面积无关", SYSTEM)
@@ -195,7 +195,7 @@ def _dock(w, t, batt):
 
 
 class TestChargeThrash(unittest.TestCase):
-    """User (2026-11-11): charged -> resumed -> flat again in no time,
+    """charged -> resumed -> flat again in no time,
     repeatedly, means the resume-level handling is broken.  Detect it
     from the segment ledger and force a high resume floor."""
 
@@ -261,7 +261,7 @@ class TestGuaranteeSoc(unittest.TestCase):
         self.assertLessEqual(big, 100)
 
     def test_prompt_carries_guarantee_and_afternoon_anchor(self):
-        # User (2026-11-11): the guarantee figure prices the
+        # the guarantee figure prices the
         # one-shot end of a balance (finish-remaining-in-one-go vs
         # splitting into more charge cycles and paying each cycle's
         # overhead); the LLM weighs both ends, nothing is a floor.
@@ -269,7 +269,7 @@ class TestGuaranteeSoc(unittest.TestCase):
         # All judgment logic for the LLM - not hardcoded rules.
         self.assertIn("resume_soc_to_guarantee_finish", SYSTEM)
         self.assertIn("一口气扫完剩余", SYSTEM)
-        # User (2026-11-11): the guarantee figure is one END of a
+        # the guarantee figure is one END of a
         # balance (one-shot finish vs multi-cycle overhead losses),
         # not a hardcoded floor that must be reached before resuming.
         self.assertIn("平衡题", SYSTEM)
@@ -311,13 +311,13 @@ class TestChargeOptions(unittest.TestCase):
                                 d["eta_minutes_left"])
 
     def test_prompt_total_span_bottom_line(self):
-        # User (2026-11-11): charging time must not stretch the
+        # charging time must not stretch the
         # OVERALL session span to an unacceptable extent.
         self.assertIn("总跨度", SYSTEM)
         self.assertIn("projected_total_span_min", SYSTEM)
 
     def test_prompt_carries_waiting_cost_logic(self):
-        # User (2026-11-11): charging to 80% is unacceptable if ready
+        # charging to 80% is unacceptable if ready
         # only 3-4 hours later; 50% buying an acceptable area can be
         # the right call.  The judge gets the time price per level.
         self.assertIn("charge_options", SYSTEM)
@@ -348,7 +348,7 @@ class TestExpectedDuration(unittest.TestCase):
 
 
 class TestComplexityAccounting(unittest.TestCase):
-    """User (2026-11-11): in a cluttered environment, judge against
+    """in a cluttered environment, judge against
     what remains AFTER excluding obstacle-blocked area, and against
     the pace this environment actually demonstrates."""
 
@@ -385,7 +385,7 @@ class TestComplexityAccounting(unittest.TestCase):
         self.assertIn("复杂度", SYSTEM)
 
     def test_low_yield_share_measures_probing_time(self):
-        # User (2026-11-11): time spent probing around an obstacle
+        # time spent probing around an obstacle
         # legitimately progresses ~nowhere; surface it as a measured
         # share instead of letting it silently poison the pace.
         w = SessionWatch(SupervisorConfig(enabled=True))
@@ -405,7 +405,7 @@ class TestComplexityAccounting(unittest.TestCase):
         self.assertGreater(d["advancing_pace_m2_per_min"], 0)
 
     def test_total_span_outranks_ratio_and_must_speak_up(self):
-        # User (2026-11-11): whatever the (complexity-adjusted)
+        # whatever the (complexity-adjusted)
         # speed, the TOTAL span must not stretch to unacceptable;
         # and if complexity truly makes it unfinishable, the user
         # must be TOLD, not left watching it grind on silently.
@@ -434,7 +434,7 @@ class TestComplexityAccounting(unittest.TestCase):
         self.assertEqual(socs, sorted(socs))
 
     def test_ai_charge_model_update_parsing(self):
-        # User (2026-11-11): the AI calibrates the charge model from
+        # the AI calibrates the charge model from
         # history; code validates shape only.
         v = parse_verdict(
             '{"action": "continue", "charge_model_update": '
@@ -464,7 +464,7 @@ class TestComplexityAccounting(unittest.TestCase):
         self.assertEqual(d["charge_history_recent"][0]["start_soc"], 30)
 
     def test_ask_user_verdict_and_timeout_default(self):
-        # User (2026-11-11): when the supervisor hands the choice to
+        # when the supervisor hands the choice to
         # the user, 5 minutes without feedback = return & end.
         v = parse_verdict('{"action": "ask_user", "message": "还扫吗"}')
         self.assertEqual(v.action, "ask_user")
@@ -475,7 +475,7 @@ class TestComplexityAccounting(unittest.TestCase):
         self.assertNotIn("下限抬到 95%", SYSTEM)
 
     def test_no_hardcoded_thrash_floor(self):
-        # User (2026-11-11): conclusions belong to the AI, not code -
+        # conclusions belong to the AI, not code -
         # the forced 95% resume floor is gone; thrash stays a
         # measured flag in the digest for the supervisor to weigh.
         self.assertFalse(hasattr(SupervisorConfig(),
@@ -484,7 +484,7 @@ class TestComplexityAccounting(unittest.TestCase):
 
 
 class TestHomeCacheConsistency(unittest.TestCase):
-    """User (2026-11-11): robot taken to another home / new map /
+    """robot taken to another home / new map /
     different rooms -> cached denominators must not be reported as
     fact, and a one-off foreign layout must not poison the cache."""
 
@@ -564,7 +564,7 @@ class TestHomeProfile(unittest.TestCase):
         self.assertEqual(d["normal_session_max_min"], 180)
 
     def test_prompt_defers_to_home_note(self):
-        # User (2026-11-11): this home cleans living/dining/kitchen/
+        # this home cleans living/dining/kitchen/
         # study only and normally finishes within 3 h - the household
         # yardstick outranks the generic one.
         self.assertIn("home_note", SYSTEM)

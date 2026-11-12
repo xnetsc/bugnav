@@ -1,23 +1,20 @@
-"""Real-robot adapter built on the unofficial `deebot-client` library.
+"""Real-robot adapter built on the unofficial `deebot-client` library
+(pinned at 11.1.0b2).
 
-Verified against deebot-client 11.0.0 (the pinned PyPI release - its
-wheels install cleanly in Docker; upstream git main is ahead of PyPI
-and needs a Rust toolchain to build, so we do NOT track main):
   * Authenticator + create_rest_config + ApiClient.get_devices()
   * Device(device_info, authenticator); await device.initialize(mqtt)
   * PositionsEvent carries Position(x, y, a) - raw map units + heading;
     PositionType lives in deebot_client.events on this version
-  * StateEvent / ErrorEvent for status and faults
-  * Clean(CleanAction.PAUSE/RESUME/START/STOP) and
-    CleanArea(CleanMode.CUSTOM_AREA, "x1,y1,x2,y2") - area is a
-    comma-joined string on this version, not a list
+  * StateEvent / ErrorEvent for status and faults; work state via
+    GetChargeState + GetWorkState (see work_state.py)
+  * Commands go through clean_V2: pause / resume / stop, directed
+    movement via content type mapPoint, a fresh AUTO start in raw
+    form, return-to-dock via Charge, the alert tone via PlaySound
 
-UNVERIFIED on a physical T80s: whether the T80s (DEX62, China region)
-is classified as a supported MQTT device at all, whether GetPos streams
-at a useful rate, and whether CUSTOM_AREA commands are accepted.  The
-runner's `observe` mode exists precisely to answer those questions
-before any command is ever sent.  If the device lands in
-`devices.not_supported`, this adapter says so loudly and exits.
+Hardware classes the library does not know are aliased to the
+closest known class's capability set (see AdapterConfig).  If the
+device lands in `devices.not_supported`, this adapter says so
+loudly and exits.
 
 The account password is read from the ECOVACS_PASSWORD environment
 variable only - never from the config file, never logged.
@@ -53,13 +50,13 @@ class AdapterConfig:
     # Newer firmwares dropped getCleanInfo entirely (the T80S fw 1.61.0
     # answers `20003 rcp not support` to both V1 and V2), which left the
     # work state (cleaning/paused/returning) frozen at whatever the
-    # charge state last said - observed live 2026-11-11: state stayed
+    # charge state last said - state stayed
     # "docked" through a whole cleaning run. deebot-client's newest
     # hardware classes (c8rj4y etc.) source StateEvent exactly this way.
     work_state_patch: bool = True
     # Hardware classes deebot-client does not know yet, aliased to the
     # closest known class's capability set. The T80S (model
-    # KEPLER_PLUS_WH_AUTO, class "nazy54", probed live 2026-11-11) is
+    # KEPLER_PLUS_WH_AUTO, class "nazy54") is
     # unknown upstream. First template tried (ee23uv, V1 commands) got
     # `20003 rcp not support` for getCleanInfo from the T80S firmware
     # (fw 1.61.0) - it speaks the V2 command set. 9kpees carries the
@@ -105,7 +102,7 @@ def parse_map_id(raw) -> str | None:
     """The active map's id ('mid') from a getCachedMapInfo reply:
     the built map's mid, else the last listed one.  Swept history
     is bound to this id - the same coordinates under another map
-    are another place entirely (user rule 2026-11-12)."""
+    are another place entirely ."""
     try:
         data = (((raw or {}).get("resp", {}).get("body", {}) or {})
                 .get("data", {}) or {})
@@ -140,7 +137,7 @@ class DeebotAdapter:
         # Robot clock basis: (device epoch s, monotonic s at capture).
         # device_now() projects it forward on the monotonic clock, so
         # the AI's sense of 'now' is the ROBOT's time, immune to host
-        # wall-clock skew and jumps (user 2026-11-11: AI 的时钟以
+        # wall-clock skew and jumps (AI 的时钟以
         # 扫地机自己上报的时间和时区为准，不可以写死).
         self._device_clock: tuple[float, float] | None = None
         self.water_amount: int | None = None  # latest WaterInfoEvent amount 1..4
@@ -158,8 +155,8 @@ class DeebotAdapter:
 
     def to_raw_point(self, point: Point) -> str:
         """The 'x,y' content string a mapPoint command expects - the
-        same raw frame GetPos reports in (calibrated live 2026-11-12:
-        commanded raw targets were reached within ~0.13 m)."""
+        same raw frame GetPos reports in (commanded raw targets are
+        reached within ~0.13 m)."""
         def raw_x(x_m: float) -> float:
             if self.cfg.invert_x:
                 x_m = -x_m
@@ -306,8 +303,8 @@ class DeebotAdapter:
         # The robot carries its own clock and timezone and stamps
         # every response header with them ('ts' = device epoch ms,
         # 'tzm' = offset minutes).  Verified NOT an echo of the
-        # request header: a probe declaring tzm=0 was still answered
-        # 480 (2026-11-11).  Capture both as the time basis for
+        # request header: a request declaring tzm=0 is still answered
+        # 480.  Capture both as the time basis for
         # everything downstream.
         try:
             from deebot_client.commands.json.battery import GetBattery
@@ -366,8 +363,8 @@ class DeebotAdapter:
         return self._last_contact_t
 
     async def ping(self) -> bool:
-        """One cheap cloud round-trip (a battery read - a query, so
-        it is observe-safe).  True when the cloud answered.  False
+        """One cheap cloud round-trip (a battery read - a query,
+        nothing is commanded).  True when the cloud answered.  False
         on ANY failure: a token expired during a long outage fails
         here too, and the watchdog's answer to that is the same
         reconnect-with-fresh-login.  Deliberately no retry inside:
@@ -440,7 +437,7 @@ class DeebotAdapter:
     # ------------------------------------------------------------ command
     async def current_map_id(self, log) -> str | None:
         """The firmware's active map id, or None when unreadable
-        (callers then keep the previously bound history - a failed
+        (callers then keep the currently bound history - a failed
         read never rebinds anything)."""
         if self._device is None:
             return None
@@ -523,9 +520,9 @@ class DeebotAdapter:
                     "this adapter is configured for V1 commands")
             value = self.to_raw_point(cmd.point)
             # content type 'mapPoint' - the one directed-movement
-            # type fw 1.61.0 implements (probed live 2026-11-12:
-            # code 0, robot drives to the point; customArea /
-            # spotArea are rejected with 20011).
+            # type fw 1.61.0 implements (code 0, robot drives to
+            # the point; customArea / spotArea are rejected with
+            # 20011).
             await _exec(_RawArgs({"act": "start", "content": {
                 "type": "mapPoint", "value": value}}))
             log(f"sent mapPoint value={value}")
