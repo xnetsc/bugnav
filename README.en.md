@@ -290,29 +290,9 @@ Layout: `bugnav/` (core logic + simulator + real-robot adapter),
 `deploy/` (systemd and Mac deployment pieces), `tests/` (unit and
 three-scenario end-to-end tests), `Dockerfile`, `docker-compose.yml`.
 
-## Verification status (stated honestly)
+## Known ceilings
 
-- Fixed after the 2026-11-12 live incident (code-level, with
-  regression tests): the supervisor once condemned a healthy bout
-  as "not worth continuing" using a flat 1.1 m²/min yardstick and
-  the recent-window pace - ETA and the conservative expectation
-  now project at the bout's overall demonstrated pace, with the
-  window pace demoted to a labelled pessimistic bound; and a stop
-  verdict used to latch the daemon itself in shadow mode, leaving
-  the rest of the bout unsupervised - a stop is now a request, not
-  a fact: supervision runs until the bout is observed to end, and
-  latches reset on a new bout.
-- Verified on the real robot: cloud login and the position /
-  state / battery / error streams; a full real scheduled clean
-  observed end to end; supervisor verdicts served by the real LLM
-  endpoint; the `getWorkState` state stream; and on 2026-11-12
-  directed movement via `mapPoint` (code 0, the robot drives to
-  the commanded point in the GetPos frame, ~0.13 m arrival
-  error), STOP, and return-to-dock - all sent and observed live.
-- Pending on-robot verification: the playSound alert tone (fires
-  on a trapped declaration), and calibrating the water gauge
-  bands against the app's display.
-- Known ceilings: no custom voice/intercom exists in the protocol
-  (built-in sounds only); the camera feed runs over a vendor-only
-  session an external program cannot join; dirt detection is
-  internal firmware behaviour and emits no events.
+- No custom voice/intercom exists in the protocol (built-in
+  sounds only); the camera feed runs over a vendor-only session
+  an external program cannot join; dirt detection is internal
+  firmware behaviour and emits no events.
