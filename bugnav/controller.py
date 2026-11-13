@@ -123,6 +123,15 @@ class ControllerConfig:
     # ~0.4 m across even though the leg itself is a few cm wide.
     small_obstacle_radius_m: float = 0.45
     session_blacklist_ttl_s: float = 6 * 3600.0
+    # A spot whose episode just SUCCEEDED is handled.  The fresh
+    # native plan will wander back into the same furniture while
+    # cleaning around it, and re-firing the soft triggers there
+    # resets the native session again - which is what sends it
+    # re-cleaning ground this bout already covered and hopping
+    # between disconnected patches.  Soft triggers (struggle,
+    # perimeter loiter) inside a resolved cluster are suppressed
+    # for this long; hard signals (ramming, error states) are not.
+    resolved_suppress_s: float = 900.0
     cooldown_s: float = 45.0
     backtrack_spacing_m: float = 0.45
     detector: DetectorConfig = field(default_factory=DetectorConfig)
@@ -199,6 +208,9 @@ class BugNavController:
         # hands-off until a human visibly intervenes.
         self._trapped_pos: Point | None = None
         self._blacklist: list[tuple[Point, float]] = []  # (centre, expiry t)
+        # (centre, radius_m, expiry t) of clusters whose episode
+        # ended in success - see resolved_suppress_s.
+        self._resolved_marks: list[tuple[Point, float, float]] = []
         self._cooldown_until = 0.0
         self._consult_pos: Point | None = None
         self._error_pause_sent = False
@@ -325,6 +337,13 @@ class BugNavController:
                 centre=sample.pos,
                 approach_heading_deg=sample.heading_deg or 0.0,
             )
+        if (event is not None and sample.error_code == 0
+                and self._within_resolved(event.centre, sample.t)):
+            # This spot's episode just succeeded - the robot is
+            # cleaning around the same furniture, not stuck anew.
+            # Taking over again would reset the native session and
+            # send it re-cleaning finished ground.
+            event = None
         if event is None:
             rev = self.ramming.feed(sample)
             if rev is not None:
@@ -407,6 +426,8 @@ class BugNavController:
         else:
             cluster = ObstacleCluster(hits=list(event.ring_points))
             self.clusters.clusters.append(cluster)
+        if self._within_resolved(cluster.centre, sample.t):
+            return []  # this cluster's episode just succeeded
         # Map first: a bump is not
         # automatically a gap-hunt.  If the map says this spot is
         # at the edge of the cleanable area, it is a wall/corner -
@@ -505,7 +526,27 @@ class BugNavController:
                 ),
             )
         )
-        if self._anchor is not None and sample.pos.distance_to(self._anchor) > self.cfg.arrival_tol_m:
+        retreat = (
+            self._anchor is not None
+            and sample.pos.distance_to(self._anchor) > self.cfg.arrival_tol_m
+        )
+        if retreat and self._anchor is not None:
+            # Locality: cleaning must continue over the ground next
+            # to the obstacle, not drag the robot across the house.
+            # If the anchor lies farther from the obstacle than the
+            # staging ring while the robot is already at working
+            # distance, retreating hauls it AWAY from the area it
+            # has to work - skip the retreat and start from the
+            # staging point nearest the robot instead.
+            ring_m = cluster.radius_m + self._clearance_m
+            if (
+                self._anchor.distance_to(cluster.centre) > ring_m + 0.25
+                and sample.pos.distance_to(cluster.centre) <= ring_m + 0.25
+            ):
+                retreat = False
+                robot_theta = angle_of(sample.pos - cluster.centre)
+                self._theta_deg = (robot_theta - self._step_deg) % 360.0
+        if retreat:
             self.phase = Phase.RETREAT
             self._pending_target = self._anchor
             self._deadline = sample.t + self.cfg.retreat_timeout_s
@@ -854,6 +895,9 @@ class BugNavController:
         assert cl is not None
         st = self.stats[self._stats_key]
         st.successes += 1
+        self._resolved_marks.append(
+            (cl.centre, cl.radius_m,
+             sample.t + self.cfg.resolved_suppress_s))
         if self._goal is not None:
             staging = self._staging_point(self._theta_deg)
             st.success_headings.append(quantize_heading(angle_of(self._goal - staging)))
@@ -1060,6 +1104,14 @@ class BugNavController:
         return any(
             centre.distance_to(c) <= 1.0 + self.cfg.staging_clearance_m
             for c, _ in self._blacklist
+        )
+
+    def _within_resolved(self, centre: Point, t: float) -> bool:
+        self._resolved_marks = [
+            m for m in self._resolved_marks if m[2] > t]
+        return any(
+            centre.distance_to(c) <= r + 0.35
+            for c, r, _ in self._resolved_marks
         )
 
     def _load_stats(self) -> None:
