@@ -3,10 +3,11 @@
 The simulated *stock* robot is deliberately dumb in the same way the
 real firmware is: in AUTO mode it drives straight at its goal, and when
 it meets an obstacle it jiggles back and forth forever - it never gives
-up and never replans.  When it receives an external command (our
-controller's MOVE_TO), it uses a grid A* planner over the walls it
-can see, like the real robot's map-based planner would: it can route
-*around* an obstacle, but it cannot pass through a closed side.
+up and never replans.  When it receives a MOVE_TO command, it uses a
+grid A* planner over the walls it can see, like the real robot's
+map-based planner would: it can route *around* an obstacle, but it
+cannot pass through a closed side.  Pause, resume, start and jog
+commands move it the way the real command channel does.
 
 Walls are line segments; the robot is a point with a clearance radius.
 """

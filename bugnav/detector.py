@@ -17,10 +17,9 @@ The perimeter detector watches for it instead: over a longer window
 the robot stays inside a ~0.65 m disc, travels several metres, and
 accumulates a large total turn while ending up about where it
 started.  This pattern also occurs during the firmware's normal
-intensive local cleaning; that gates nothing - an obstacle encounter
-goes straight into the along-edge logic in every scenario, so the
-controller takes over on the first loiter at a spot (and only once
-per spot per session - the episode's outcome then stands).
+intensive local cleaning; that gates nothing by itself - the
+controller answers the first loiter at a spot with a pause-hold,
+under a per-spot attempt budget for the session.
 
 Ramming is the third shape, and the one that actually hangs wheels:
 the firmware backs off a few decimetres and charges the SAME obstacle
@@ -60,7 +59,6 @@ class DetectorConfig:
     min_path_m: float = 0.55  # it really is trying, not just paused
     max_net_m: float = 0.22  # ...but getting nowhere
     min_reversals: int = 2  # heading reversals inside the window
-    attempt_window_s: float = 18.0  # shorter budget per guided attempt
 
 
 @dataclass

@@ -62,11 +62,10 @@ class Command:
 
 
 @dataclass
-class EpisodeStats:
+class SpotStats:
     """Cross-session statistics for one obstacle location (never a ban)."""
 
     grid_key: str
-    episodes: int = 0
+    interventions: int = 0
     successes: int = 0
     abandons: int = 0
-    success_headings: list[int] = field(default_factory=list)

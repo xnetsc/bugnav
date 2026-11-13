@@ -1,4 +1,4 @@
-"""bugnav: external Bug-algorithm obstacle exploration for a Deebot T80s.
+"""bugnav: external, session-preserving stuck handling for a Deebot T80s.
 
 The robot firmware is closed, so this logic runs on an external host and
 talks to the robot through the (unofficial) deebot-client cloud API.

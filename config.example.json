@@ -13,7 +13,6 @@
   },
   "controller": {
     "detector": {
-      "attempt_window_s": 18.0,
       "max_net_m": 0.22,
       "min_path_m": 0.55,
       "min_reversals": 2,
@@ -28,15 +27,19 @@
       "rearm_extra_m": 0.5,
       "window_s": 40.0
     },
-    "perimeter_repeat_radius_m": 0.6,
-    "goal_depth_m": 0.55,
-    "session_blacklist_ttl_s": 21600,
-    "small_obstacle_radius_m": 0.45,
-    "staging_clearance_m": 0.5,
-    "step_angle_deg": 30.0,
-    "llm_strategy_enabled": true,
-    "max_consults_per_episode": 2,
-    "consult_after_failures": 4
+    "pinned": {
+      "window_s": 60.0
+    },
+    "error_rescue_delay_s": 10.0,
+    "hold_settle_s": 6.0,
+    "hold_watch_s": 45.0,
+    "hold_max_attempts": 3,
+    "resolved_suppress_s": 900.0,
+    "hold_blocked_ttl_s": 21600,
+    "jog_observe_s": 8.0,
+    "jog_free_m": 0.25,
+    "jog_max_steps": 3,
+    "jog_error_clear_s": 8.0
   },
   "data_dir": "data",
   "notify_webhook": "",
@@ -45,10 +48,10 @@
     "enabled": true,
     "review_interval_s": 1200,
     "session_soft_cap_s": 10800,
-    "episode_trigger": 6,
     "rolling_window_s": 900,
     "water_reset_dock_s": 120,
     "home_note": "",
-    "normal_session_max_s": 0
+    "normal_session_max_s": 0,
+    "intervention_trigger": 6
   }
 }

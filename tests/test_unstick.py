@@ -1,16 +1,17 @@
-"""Wedged rescue: backing out comes before any exploration.
+"""Wedged rescue: backing out is the whole rescue.
 
 - A fault that persists while the robot stays put (state ERROR
   or paused-with-error - the firmware uses both for one fault)
   triggers a jog back-out after the persistence delay, and only
   then.
 - A position frozen while cleaning triggers the same back-out.
-- A back-out that frees the robot hands the session back: resume
-  if it resumes, a fresh AUTO start right there if it did not
-  survive, escalation to the along-edge episode if the fault
-  persists.
-- A back-out that goes nowhere (rear blocked) escalates to the
-  along-edge episode after the jog budget runs out.
+- A back-out that frees the robot: the jog has spent the native
+  session, so once the fault reads clear a fresh AUTO clean
+  starts right there; if the robot resumes on its own, the
+  rescue simply closes.
+- A back-out that fails - the fault persists, or the rear is
+  blocked and the jog budget runs out - stops the robot, sounds
+  its alarm and waits for a human (the trapped latch).
 """
 
 import sys
@@ -137,13 +138,15 @@ class TestUnstickOutcomes(unittest.TestCase):
                      RobotState.PAUSED, err=0)
         cmds += _feed(ctl, 12, 12, Point(-4.33, -2.15),
                       RobotState.PAUSED, err=0)
-        self.assertIn(CommandKind.RESUME_AUTO, _kinds(cmds))
+        # Freed: jog stream stopped, and NO resume is sent - the
+        # jog spent the session, there is nothing to resume.
+        self.assertNotIn(CommandKind.RESUME_AUTO, _kinds(cmds))
         jogs = [c for c in cmds if c.kind == CommandKind.JOG]
         self.assertEqual([j.act for j in jogs], ["stop"])
         cmds = _feed(ctl, 13, 13, Point(-4.33, -2.15),
                      RobotState.CLEANING, err=0)
         self.assertNotIn(CommandKind.START_AUTO, _kinds(cmds))
-        self.assertEqual(ctl.phase, Phase.COOLDOWN)
+        self.assertEqual(ctl.phase, Phase.MONITOR)
 
     def test_freed_but_session_dead_starts_fresh_auto(self):
         ctl = BugNavController(ControllerConfig())
@@ -151,26 +154,32 @@ class TestUnstickOutcomes(unittest.TestCase):
         _feed(ctl, 11, 11, Point(-4.53, -2.15), RobotState.PAUSED,
               err=0)
         _feed(ctl, 12, 12, Point(-4.33, -2.15), RobotState.PAUSED,
-              err=0)
-        cmds = _feed(ctl, 13, 23, Point(-4.33, -2.15),
+              err=0)  # freed at t=12; fault-clear window ends t=20
+        cmds = _feed(ctl, 13, 19, Point(-4.33, -2.15),
                      RobotState.PAUSED, err=0)
         self.assertNotIn(CommandKind.START_AUTO, _kinds(cmds))
-        cmds = _feed(ctl, 24, 24, Point(-4.33, -2.15),
+        cmds = _feed(ctl, 20, 20, Point(-4.33, -2.15),
                      RobotState.PAUSED, err=0)
         self.assertIn(CommandKind.START_AUTO, _kinds(cmds))
-        self.assertEqual(ctl.phase, Phase.COOLDOWN)
+        self.assertEqual(ctl.phase, Phase.MONITOR)
 
-    def test_freed_but_fault_persists_escalates(self):
+    def test_freed_but_fault_persists_waits_for_rescue(self):
         ctl = BugNavController(ControllerConfig())
         _error_unstick(ctl)
         _feed(ctl, 11, 12, Point(-4.33, -2.15), RobotState.PAUSED,
               err=103)
-        cmds = _feed(ctl, 13, 24, Point(-4.33, -2.15),
+        cmds = _feed(ctl, 13, 20, Point(-4.33, -2.15),
                      RobotState.PAUSED, err=103)
-        self.assertIn(CommandKind.MOVE_TO, _kinds(cmds))
-        self.assertNotEqual(ctl.phase, Phase.UNSTICK)
+        self.assertIn(CommandKind.PLAY_SOUND, _kinds(cmds))
+        self.assertNotIn(CommandKind.MOVE_TO, _kinds(cmds))
+        self.assertEqual(ctl.phase, Phase.MONITOR)
+        self.assertIsNotNone(ctl._trapped_pos)
+        # Latched: the same persisting fault starts nothing new.
+        cmds = _feed(ctl, 21, 40, Point(-4.33, -2.15),
+                     RobotState.PAUSED, err=103)
+        self.assertNotIn(CommandKind.JOG, _kinds(cmds))
 
-    def test_rear_blocked_escalates_after_jog_budget(self):
+    def test_rear_blocked_waits_for_rescue_after_jog_budget(self):
         ctl = BugNavController(ControllerConfig())
         _error_unstick(ctl)  # step 1 out at t=10, deadline 18
         cmds = _feed(ctl, 11, 18, WEDGE, RobotState.PAUSED, err=103)
@@ -178,8 +187,10 @@ class TestUnstickOutcomes(unittest.TestCase):
         cmds = _feed(ctl, 19, 26, WEDGE, RobotState.PAUSED, err=103)
         self.assertIn(CommandKind.JOG, _kinds(cmds))  # step 3
         cmds = _feed(ctl, 27, 34, WEDGE, RobotState.PAUSED, err=103)
-        self.assertIn(CommandKind.MOVE_TO, _kinds(cmds))
-        self.assertNotEqual(ctl.phase, Phase.UNSTICK)
+        self.assertIn(CommandKind.PLAY_SOUND, _kinds(cmds))
+        self.assertNotIn(CommandKind.MOVE_TO, _kinds(cmds))
+        self.assertEqual(ctl.phase, Phase.MONITOR)
+        self.assertIsNotNone(ctl._trapped_pos)
 
     def test_moving_robot_never_unsticks(self):
         ctl = BugNavController(ControllerConfig())

@@ -3,7 +3,7 @@
 A bump does not automatically start a gap-hunt: whether the
 obstacle is a wall is decided by the map.  At the edge of the
 known cleanable area (a big never-cleaned arc around the spot)
-it IS a wall/corner and gets no dive-in episode; anything else -
+it IS a wall/corner and gets no intervention; anything else -
 interior furniture, a U-chair included - is not a wall."""
 
 import math
@@ -75,7 +75,7 @@ class TestPerimeterGate(unittest.TestCase):
             cmds.extend(ctl.tick(s))
         return cmds
 
-    def test_loiter_at_map_edge_is_a_wall_no_episode(self):
+    def test_loiter_at_map_edge_is_a_wall_no_intervention(self):
         ctl = BugNavController()
         ctl.set_footprint(block(-30, 0, -30, 30))
         cmds = self._run(ctl, circle_samples(O, 0.0))

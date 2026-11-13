@@ -1,10 +1,9 @@
-"""LLM access for the two judgement layers (supervisor, strategist).
+"""LLM access for the supervisor judgement layer.
 
 The real-time controller stays deterministic on purpose: cloud LLM
 calls are far too slow and too failure-prone to sit in a robot's
 reflex path.  The LLM is used where latency does not matter - the
-supervisor's periodic whole-bout verdicts and the strategist's
-per-episode consults.
+supervisor's periodic whole-bout verdicts.
 
 Configuration is environment-only (credentials never live in code or in
 config.json), against any OpenAI-compatible endpoint:
@@ -34,7 +33,7 @@ def llm_configured() -> bool:
 def build_payload(model: str, messages: list[dict], *,
                   json_mode: bool = True) -> dict:
     """Chat-completions payload.  Every bugnav consumer parses the
-    reply as JSON (advisor Plan, supervisor Verdict), so JSON mode is
+    reply as JSON (supervisor Verdict), so JSON mode is
     enforced at the API level via response_format - not merely
     requested in the prompt .  Both prompts do
     mention JSON, which json_object mode requires."""

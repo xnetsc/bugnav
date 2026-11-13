@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bugnav.controller import BugNavController, ConsultRequest, Phase
+from bugnav.controller import BugNavController, Phase
 from bugnav.detector import RammingDetector
 from bugnav.geometry import Point
 from bugnav.model import CommandKind, RobotState, Sample
@@ -125,47 +125,68 @@ class TestRammingDetector(unittest.TestCase):
 
 
 class TestHandlingFollowsData(unittest.TestCase):
-    """The rule at controller level: phases entered by
-    sending commands (cooldown after hand-back, consult while
-    paused) must not blind the adjustment logic."""
+    """The rule at controller level: a phase entered by sending
+    commands (a pause-hold) must not blind the adjustment logic -
+    the post-resume watch judges the resumed session by what it
+    actually does, and an externally resumed robot closes the
+    hold at once."""
 
-    def test_cooldown_still_detects_ramming(self):
+    def _into_watch(self, ctl: BugNavController) -> Point:
+        centre = Point(0.27, 0.0)
+        cluster = ctl.clusters.find_or_create(centre)
+        ctl._begin_hold(
+            Sample(t=0.0, pos=Point(0.0, 0.0),
+                   state=RobotState.CLEANING),
+            centre, cluster, notify_text="test hold")
+        assert ctl.phase == Phase.HOLD
+        cmds = ctl.tick(Sample(t=10.0, pos=Point(0.0, 0.0),
+                               state=RobotState.PAUSED))
+        assert ctl._hold_stage == "watch", ctl._hold_stage
+        assert any(c.kind == CommandKind.RESUME_AUTO for c in cmds)
+        return centre
+
+    def test_hold_watch_detects_ramming_again(self):
         ctl = BugNavController()
-        ctl.phase = Phase.COOLDOWN
-        ctl._cooldown_until = 1e9  # timer nowhere near expiry
+        self._into_watch(ctl)
         kinds = []
         pts = _sawtooth((0.0, 0.0), (0.55, 0.0), cycles=3)
-        for s in (Sample(t=i * 2.0, pos=Point(x, y),
+        for s in (Sample(t=12.0 + i * 2.0, pos=Point(x, y),
                          state=RobotState.CLEANING)
                   for i, (x, y) in enumerate(pts)):
             kinds.extend(c.kind for c in ctl.tick(s))
+            if ctl._hold_stage == "settle":
+                break
+        # The pattern formed again: next attempt - paused again,
+        # still in the same hold, attempt count advanced.
         self.assertIn(CommandKind.PAUSE, kinds)
-        self.assertNotEqual(ctl.phase, Phase.COOLDOWN)
+        self.assertEqual(ctl.phase, Phase.HOLD)
+        self.assertEqual(ctl._hold_count, 2)
 
-    def test_consult_cancelled_when_robot_cleans_away(self):
+    def test_hold_closed_when_robot_cleans_away(self):
         ctl = BugNavController()
-        ctl.phase = Phase.CONSULT
-        ctl.pending_consult = ConsultRequest(
-            kind="full_circle", situation={}, t=0.0)
-        ctl._consult_pos = Point(0.0, 0.0)
-        cmds = ctl.tick(Sample(t=10.0, pos=Point(1.0, 0.0),
+        centre = Point(0.0, 0.0)
+        cluster = ctl.clusters.find_or_create(centre)
+        ctl._begin_hold(
+            Sample(t=0.0, pos=centre, state=RobotState.CLEANING),
+            centre, cluster, notify_text="test hold")
+        cmds = ctl.tick(Sample(t=1.0, pos=Point(1.0, 0.0),
                                state=RobotState.CLEANING))
         self.assertEqual(ctl.phase, Phase.MONITOR)
-        self.assertIsNone(ctl.pending_consult)
         self.assertTrue(any(
             c.kind == CommandKind.NOTIFY
-            and "consult cancelled" in c.message for c in cmds))
+            and "cleaning again away" in c.message for c in cmds))
 
-    def test_consult_waits_while_robot_stays_paused(self):
+    def test_hold_waits_while_robot_stays_paused(self):
         ctl = BugNavController()
-        ctl.phase = Phase.CONSULT
-        ctl.pending_consult = ConsultRequest(
-            kind="full_circle", situation={}, t=0.0)
-        ctl._consult_pos = Point(0.0, 0.0)
-        cmds = ctl.tick(Sample(t=10.0, pos=Point(0.05, 0.0),
+        centre = Point(0.0, 0.0)
+        cluster = ctl.clusters.find_or_create(centre)
+        ctl._begin_hold(
+            Sample(t=0.0, pos=centre, state=RobotState.CLEANING),
+            centre, cluster, notify_text="test hold")
+        cmds = ctl.tick(Sample(t=3.0, pos=Point(0.05, 0.0),
                                state=RobotState.PAUSED))
         self.assertEqual(cmds, [])
-        self.assertEqual(ctl.phase, Phase.CONSULT)
+        self.assertEqual(ctl.phase, Phase.HOLD)
 
 
 if __name__ == "__main__":

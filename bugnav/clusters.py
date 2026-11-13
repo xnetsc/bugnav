@@ -1,8 +1,9 @@
 """Obstacle clusters: hit points that belong to one obstacle are merged.
 
-Four table legs plus a crossbar are one obstacle, not four.  Merging by
-distance makes the perimeter exploration walk the outline of the whole
-furniture piece and try every leg gap in one episode.
+Four table legs plus a crossbar are one obstacle, not four.  Merging
+by distance makes every trigger at the same furniture piece share
+one identity - one attempt budget, one quiet mark, one statistics
+record - instead of being handled as separate spots.
 """
 
 from __future__ import annotations

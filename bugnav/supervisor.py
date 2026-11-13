@@ -1,15 +1,12 @@
 """Session supervisor: LLM common-sense oversight of the whole clean.
 
-Two judgment layers live outside the deterministic controller because
-they cannot be hardcoded honestly:
-  * the episode strategist (strategist.py) advises inside one obstacle
-    encounter;
-  * this supervisor watches the whole bout: "started 07:00, it is now
-    noon, it re-cleaned the same rooms five times and covered half the
-    home - just stop." A fixed hour-threshold would misfire on a big
-    home; the judgment is contextual, so deterministic code computes
-    an honest digest and decides WHEN to ask, the LLM decides what the
-    numbers mean.
+One judgment layer lives outside the deterministic controller
+because it cannot be hardcoded honestly: this supervisor watches
+the whole bout: "started 07:00, it is now noon, it re-cleaned the
+same rooms five times and covered half the home - just stop." A
+fixed hour-threshold would misfire on a big home; the judgment is
+contextual, so deterministic code computes an honest digest and
+decides WHEN to ask, the LLM decides what the numbers mean.
 
 Charge judgment follows the user-set objective: minimize TOTAL time
 (cleaning + charging + cycle overheads). The deterministic solver in
@@ -20,7 +17,7 @@ another cycle at all) and may override within bounds or stop instead.
 Bounded verdict vocabulary (the supervisor can only ever):
   continue        - nothing wrong, keep going
   notify          - tell the user something (message included)
-  abandon_current - give up on the current obstacle episode only
+  abandon_current - give up on the current intervention only
   stop_session    - stop this cleaning session entirely
   ask_user        - pause and let the USER choose (button/app);
                     no feedback within ask_timeout_s = return & end
@@ -62,7 +59,7 @@ class SupervisorConfig:
     # clock strings hours off the household's day.  This household
     # is UTC+8.
     tz_offset_hours: float = 8.0
-    episode_trigger: int = 6  # this many episodes also triggers a review
+    intervention_trigger: int = 6  # this many interventions also trigger a review
     urgent_repeat_s: float = 300.0  # min gap between cap-triggered reviews
     docked_full_pct: int = 98  # docked at/above this = bout is over
     docked_idle_close_s: float = 1800.0  # docked this long = bout over
@@ -190,8 +187,8 @@ class SessionWatch:
         self.distance_m = 0.0
         self.cells: set[tuple[int, int]] = set()
         self.cell_entries = 0
-        self.episodes_total = 0
-        self.episodes_since_review = 0
+        self.interventions_total = 0
+        self.interventions_since_review = 0
         self.dock_returns = 0
         self.errors: Counter = Counter()
         self.cleaning_since_review_s = 0.0
@@ -245,7 +242,7 @@ class SessionWatch:
                 self.distance_m = 0.0
                 self.cells = set()
                 self.cell_entries = 0
-                self.episodes_total = 0
+                self.interventions_total = 0
                 self.errors = Counter()
                 self.bout_start_battery = self.battery_pct
                 self._history.clear()
@@ -360,9 +357,9 @@ class SessionWatch:
 
         if sample.error_code:
             self.errors[sample.error_code] += 1
-        if self._last_phase == "monitor" and phase not in ("monitor", "cooldown"):
-            self.episodes_total += 1
-            self.episodes_since_review += 1
+        if self._last_phase == "monitor" and phase != "monitor":
+            self.interventions_total += 1
+            self.interventions_since_review += 1
         self._last_phase = phase
         self._last = sample
 
@@ -409,11 +406,11 @@ class SessionWatch:
         if (self.bout_cleaning_s >= self.cfg.session_soft_cap_s
                 and self.cleaning_since_review_s >= self.cfg.urgent_repeat_s):
             return True
-        return self.episodes_since_review >= self.cfg.episode_trigger
+        return self.interventions_since_review >= self.cfg.intervention_trigger
 
     def mark_reviewed(self) -> None:
         self.cleaning_since_review_s = 0.0
-        self.episodes_since_review = 0
+        self.interventions_since_review = 0
         self._charge_review_pending = False
 
     @property
@@ -693,7 +690,7 @@ class SessionWatch:
             "distance_m": round(self.distance_m, 1),
             "covered_m2_this_bout": round(self.covered_m2(), 1),
             "cell_revisit_ratio": revisit,
-            "episodes_this_bout": self.episodes_total,
+            "interventions_this_bout": self.interventions_total,
             "dock_returns": self.dock_returns,
             "errors": dict(self.errors),
             "current_phase": phase,
@@ -833,7 +830,7 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
 判断要点：
 - continue：一切正常，或虽慢但合理（大户型、首次建图）。
 - notify：有异常值得用户知道，但还不至于停（如反复清扫同一区域、电量消耗异常）。
-- abandon_current：当前这一个绕障 episode 明显在空转，放弃它、其余继续。
+- abandon_current：当前这一次干预（某处的暂停处理或脱困）明显在空转，放弃它、其余继续。
 - stop_session：整个任务已失去意义（反复打扫、长时间无有效进展、剩余无几却要再充一轮电等），直接结束。
 - ask_user：继续还是收尾各有道理、需要用户拍板时用（如总跨度已不可接受但剩余又确实可惜、真因环境复杂扫不完）。系统会暂停机器人（若在桩上则保持停靠），把你的 message 发给用户并等 5 分钟：用户按机身键或在 App 里恢复清扫=继续，让它回站=结束，5 分钟无任何反馈则自动回站结束。message 里要写清现状、预计几点能完（直接引用 eta_finish 标签，不要自己算）、慢在哪里。只用于真正的取舍题，能自己判断的不要甩给用户。
 - 预计完成时间（摘要带 eta_finish / eta_minutes_left 时）：这是按当前滚动推进速度与滚动耗电率推算的完工时刻（含预计充电轮次），eta_finish 是供引用的钟点标签、eta_minutes_left 是算好的剩余分钟。若预计完工已明显越界（如 eta_finish 标签落进深夜、或 span_over_normal_min 已明显为正）、或 eta_charges_left 还很多而剩余面积不大，要认真考虑 stop_session 或至少 notify，不要等软上限到了才反应。
@@ -852,7 +849,7 @@ SYSTEM = """你是一个扫地机器人的值班监督。下面是它本次清�
   · 合理时长不看绝对钟点、看与计划面积是否相称：摘要的 expected_total_min_for_planned_area 是按合理清扫速度扫完计划面积本应花的总时间（含必要充电），projected_vs_expected_ratio 是「已花+预计总跨度」与它的比值。比值越接近 1，效率越与面积相称；比值明显大于 1，说明效率出了问题（重扫、推进塌陷、充电策略不当），偏离越大越不合理，应考虑 stop_session、剩余留到下一次，不要为「扫完」无限续扫。但比率只判效率、不判可接受性：无论速度多合理，总跨度底线（见充电条）优先于比率。反过来也一样，而且是硬约束：预计总跨度还在本户常态之内（span_over_normal_min 不为正）、本场实际进行的时间也不长时，比率再高也只是「这场偏慢」的观察，不是「不值得继续」的判决——不许据此 stop_session，最多 notify 说明慢在哪里、继续观察。stop_session 必须能用总跨度或时段写出理由（预计完工钟点不可接受、会跨进深夜或晚间居家时段）；只有效率类理由（比率高、近期低产出、滚动耗电高）永远不够。一场才扫了二三十分钟、投影总跨度也才一小时上下的，无论如何谈不上「不值得」。这里和下文所有数字都是测量与算术，不是阈值规则——多少算过分，由你综合判断，不要用写死的「几小时」一刀切。home_note 与 normal_session_max_min 是用户按自家情况给的经验参考：范围信息（扫哪些房间）照用，时长与面积推导冲突时以面积推导为准。
   · 环境复杂度要计价：障碍多的环境推进慢是正常代价，且名义面积里有一块是障碍占住、永远扫不到的。摘要若带 blocked_area_est_m2 / cleanable_area_est_m2，预期时长已按可扫面积算；另有保守预期（expected_total_min_conservative、projected_vs_conservative_ratio）是按本场整体已证明的速度（bout_overall_pace_m2_per_min，含全部试探成本）算的——先看保守比率：落在乐观与保守之间，多半是复杂环境的正常成本；连保守预期都超出一大截，才更像真问题。保守预期缺失时（多半是本场数据还太短），不要拿乐观比率单独定罪。ETA 的主投影（eta_minutes_left / projected_total_span_min）同样按本场整体速度算；摘要若带 eta_minutes_left_if_recent_pace / projected_span_if_recent_pace_min，那是「假设当前这片地形的手感延续到全屋」的悲观界，不是预计完工时间——两者差得远时，说明难的多半只是当前这片地，不要拿悲观界当投影。
   · 试探时间单独看：low_yield_share_recent 是最近一段时间「在清扫、却没扫到新面积」的时间占比（绕障试探、脱困、重扫都在内），advancing_pace_m2_per_min 是剔除这段时间后的推进速度。试探期间推进接近零是合理的，demonstrated_pace 已把试探成本算进整体——判断整体进度用含试探的速度，不要拿 advancing_pace 去要求含试探的整体，也不要因为某段时间没进展就直接判异常。尤其注意：low_yield 高常常只是机器人正卡在一小片难啃的地形里（椅子腿林、桌下口袋，总共一两平米）——在小范围内反复冲撞、磨蹭是试探/集结层要现场处置的事，不是整场效率的判决书；看本场整体（covered_m2_this_bout、bout_overall_pace_m2_per_min）：整体已经推进了大半、只是卡在一片难区时，是继续观察或 notify，不是收尾。
-  · 真因太复杂扫很久扫不完，要出声提示：若投影显示本场将远超可接受总跨度（projected_total_span_min / eta_finish），且主因是环境太复杂（试探占比高、episodes 频繁、按保守预期也快不了），必须用 notify 把话说清：预计几点能完、慢在哪里（障碍试探占了多少）、你打算怎么处置（收尾、只扫主体、还是继续）。不许无声地无限扫下去，也不许无声地放弃——用户有权知道这次为什么扫不完。
+  · 真因太复杂扫很久扫不完，要出声提示：若投影显示本场将远超可接受总跨度（projected_total_span_min / eta_finish），且主因是环境太复杂（试探占比高、干预频繁、按保守预期也快不了），必须用 notify 把话说清：预计几点能完、慢在哪里（障碍试探占了多少）、你打算怎么处置（收尾、只扫主体、还是继续）。不许无声地无限扫下去，也不许无声地放弃——用户有权知道这次为什么扫不完。
   · 结合当前时刻与普通人作息：深夜至清晨（约 23:00–07:00）一般不应持续作业、更不应再放它出去续扫，除非任务开始时间表明这就是用户有意安排的时段；晚间居家时段长时间轰鸣也有打扰成本，已扫很久时倾向收尾。
   · 合并看三件事：已扫时长相对面积预期是否失衡（projected_vs_expected_ratio）、预计还要多久（eta_minutes_left / eta_finish）、当前时刻（now）。比率失衡 + 还要很久 + 时段不对，任意两条叠加就应认真考虑 stop_session 并在 message 里说明——但前一条的总跨度硬约束仍然优先：总跨度没超常态时，这里的「还要很久」必须是很久到完工钟点不可接受，而不是「比预期久」。
   · 报数字要对口径：message 里引用面积或速度，必须分清是本场累计（covered_m2_this_bout）、本场整体平均（bout_overall_pace_m2_per_min）还是最近窗口（rolling_new_m2、rolling_progress_m2_per_min、rolling_drain_pct_per_m2）——窗口数字只能说成窗口的（如「最近一段时间新扫 X㎡」），不许说成全场结论。

@@ -21,7 +21,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 from . import llm as llm_mod
-from . import strategist, supervisor as sup_mod
+from . import supervisor as sup_mod
 from .chargeplan import ChargeModel, plan_resume
 from .controller import BugNavController, ControllerConfig
 from .deebot_adapter import AdapterConfig, DeebotAdapter
@@ -152,17 +152,16 @@ async def _main_async(cfg_path: str) -> None:
                 _flush_pending_fallback()
             _emit(time.strftime("%H:%M:%S"), time.time(), msg)
 
-    # ---- LLM layers (strategist + supervisor). Both are inert unless
-    # their config flag is on AND an LLM key is present in the env.
+    # ---- LLM supervisor layer. Inert unless its config flag is
+    # on AND an LLM key is present in the env.
     sup_cfg = sup_mod.SupervisorConfig()
     for k, v in raw.get("supervisor", {}).items():
         setattr(sup_cfg, k, v)
     llm_ready = llm_mod.llm_configured()
-    advisor_on = ctl_cfg.llm_strategy_enabled and llm_ready
     supervisor_on = sup_cfg.enabled and llm_ready
-    if (ctl_cfg.llm_strategy_enabled or sup_cfg.enabled) and not llm_ready:
-        log("LLM layers requested in config but BUGNAV_LLM_API_KEY is "
-            "not set; running deterministic-only")
+    if sup_cfg.enabled and not llm_ready:
+        log("LLM supervisor requested in config but BUGNAV_LLM_API_KEY "
+            "is not set; running deterministic-only")
     sup_cfg.enabled = supervisor_on
     watch = sup_mod.SessionWatch(sup_cfg)
     llm_trace = llm_mod.DecisionTrace(
@@ -237,7 +236,6 @@ async def _main_async(cfg_path: str) -> None:
 
     state = {
         "last_sample": None,
-        "consult_task": None,
         "review_task": None,
         "charge_target": None,  # resume at this battery % (one-shot)
         "stop_requested": False,
@@ -300,24 +298,6 @@ async def _main_async(cfg_path: str) -> None:
                         f"(network still down); continuing")
                 else:
                     log(f"command {cmd.kind} failed: {exc}")
-
-    async def service_consult(req) -> None:
-        plan = None
-        try:
-            messages = strategist.build_messages(req.situation)
-            text = await llm_mod.chat(messages)
-            plan = strategist.parse_plan(text)
-            llm_trace.record(
-                "strategist", messages, text,
-                asdict(plan) if plan is not None else None,
-                ts=_wall(), trigger=req.kind)
-            log(f"strategy advisor ({req.kind}): plan={plan}")
-        except Exception as exc:
-            log(f"strategy advisor call failed: {exc}; using fallback")
-        sample = state["last_sample"]
-        if sample is None:
-            return
-        await dispatch(controller.apply_consult_result(plan, sample))
 
     async def service_review() -> None:
         sample = state["last_sample"]
@@ -452,7 +432,7 @@ async def _main_async(cfg_path: str) -> None:
                     f"(plan={plan}, verdict_override={verdict.resume_charge_pct})")
 
     # Background tasks (the library's refresh/event machinery, our
-    # consult/review services) must not dump a traceback for a cloud
+    # review service) must not dump a traceback for a cloud
     # hiccup: transient network failures become one log line;
     # anything else keeps the default handler with full detail.
     def _on_loop_error(loop_, context) -> None:
@@ -518,7 +498,6 @@ async def _main_async(cfg_path: str) -> None:
 
     _adopt_robot_clock()
     log(f"runner started, poll={poll_s}s, "
-        f"advisor={'on' if advisor_on else 'off'}, "
         f"supervisor={'on' if supervisor_on else 'off'}")
 
     async def _sync_map_history(*, first: bool = False) -> None:
@@ -667,13 +646,6 @@ async def _main_async(cfg_path: str) -> None:
                 # robot may never have received, or may fail to
                 # complete) never mutes it.
                 await dispatch(controller.tick(sample))
-                # episode strategist servicing
-                req = controller.pending_consult
-                if (advisor_on and req is not None
-                        and (state["consult_task"] is None
-                             or state["consult_task"].done())):
-                    state["consult_task"] = asyncio.create_task(
-                        service_consult(req))
                 # session supervisor servicing - never latched
                 # off: the watch's own due() is the only gate, and
                 # it follows the live bout, not past verdicts.

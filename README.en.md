@@ -9,9 +9,11 @@ account, talks to the Ecovacs cloud (via deebot-client) to read
 position/state/battery and issue commands. Three layers:
 
 - **Control layer (deterministic, live on every 2.5 s sample)**:
-  anti-stuck detection, wall-following escape, backtracking — fully
-  decoupled from the judgment layer and always on;
-- **Judgment layer (LLM session supervisor + per-episode advisor)**:
+  anti-stuck handling — wedged/wiggling detection, pause-in-place
+  handling and jog back-out rescue, all without resetting the
+  native cleaning session (the sole exception is the wedged
+  back-out, below);
+- **Judgment layer (LLM session supervisor)**:
   code only measures and does arithmetic (speed, area, battery,
   charge curves, projected finish time); every conclusion — is this
   reasonable, continue or wrap up, charge to how much — is drawn by
@@ -32,59 +34,73 @@ operations → verification checklist → rollback), in Chinese:
 
 ## Control layer: anti-stuck
 
+The design rests on this firmware's measured behaviour: every
+externally directed move (a remote-control jog step, a mapPoint
+drive) discards the native cleaning session in progress, and the
+replacement session re-plans the whole home and re-cleans finished
+ground; rotation jogs are refused outright. The only commands that
+keep the session (and its breakpoint) are pause/resume in place,
+and the robot's own return-to-dock followed by a breakpoint
+resume. The control layer therefore handles a still-mobile robot
+with exactly those — the one exception is a wedge, whose session
+already cleans nothing, where a jog back-out is the way out.
+
 - **Struggle-precursor detection**: the stock firmware keeps climbing
   onto an obstacle until a drive wheel hangs and it errors out. This
   layer catches the precursor instead — repeated back-and-forth in a
   small area, long path with ≈0 net displacement, repeated heading
-  reversals — and takes over before any error code appears.
-- **Wall-following exploration (bug algorithm)**: after takeover it
-  traces the obstacle's contour, trying approach directions around a
-  staging ring in 30° steps; it slips through any gap it finds and
-  remembers the way in (breadcrumb trail), backtracking along it if
-  it cannot get out. Attempts are counted by distinct approach
-  direction — charging the same direction ten times is one attempt.
-  Small obstacle fully circled with a gap found = success; large
-  obstacle fully circled with no gap = give up for this session.
-- **The way out is explored too**: backtracking along the breadcrumbs
-  is only the baseline route — it is never assumed to still be clear.
-  If a new obstacle blocks it en route (struggle, or a waypoint
-  timing out with no progress), the robot switches into the same
-  wall-following detour. The return objective is prioritised:
-  **first choice is the original entrance** (the area exit at the
-  far end of the trail); if half a circle of exploration still
-  cannot regain it, the objective degrades to **leaving this area**
-  — out through any opening on the far side of the obstacle, able
-  to resume work, without fixating on the original exit. At any
-  moment during the process, if the exit corridor can be rejoined
-  (at *any* remaining breadcrumb), rejoining wins and the exit
-  continues along the original path.
-  Only when that exploration has circled completely and can neither
-  regain the exit nor leave the area at all is the robot declared
-  **trapped**: it stops and raises the alarm for a human rescue —
-  the notification goes to phone/Mac *and the robot itself sounds
-  its built-in alert tone three times*, so someone at home hears it
-  without looking at a phone — and stays hands-off until a person
-  visibly intervenes (robot moved by hand, or back at the dock).
+  reversals — and intervenes before any error code appears.
+- **Pause-hold**: the three mobile precursors (struggle, frontal
+  ramming, perimeter loiter — the robot still moves, its session
+  still produces) are handled the same way: pause in place, let it
+  settle, resume the SAME session. After the resume, a dedicated
+  unlatched detector pair watches: if the same signature forms
+  again, pause once more. Each spot has an attempt budget per
+  session (default 3); when it runs out, the user is notified and
+  the spot is left to native cleaning for the rest of the session.
+  No command on this path can reset the session.
+- **Wedged back-out**: nose-in, pushing forward forever is the other
+  stuck shape — a fault persisting while the robot stays put (one
+  and the same drive-wheel fault is reported as state ERROR or as
+  paused-with-error depending on the moment), or a position frozen
+  while cleaning. These back out first, in remote-control jog
+  steps (~0.35 m each) — forward is what wedged it. A jog always
+  ends the wedged session, so once the fault reads clear a fresh
+  whole-home clean starts from right there. If the back-out itself
+  is blocked (something behind it too, steps exhausted with no
+  movement), or the fault survives it, there is no way out under
+  its own power: it stops and raises the alarm — the notification
+  goes to phone/Mac *and the robot itself sounds its built-in
+  alert tone three times*, so someone at home hears it without
+  looking at a phone — and stays hands-off until a person visibly
+  intervenes (robot moved by hand, or back at the dock).
 - **Looping/loitering detection**: circling inside a small disc
-  (long path, large cumulative turn, small net displacement) triggers
-  takeover into wall-following on first occurrence, before it turns
-  into a struggle. But the map confirms first: a spot at the edge of
+  (long path, large cumulative turn, small net displacement)
+  triggers a pause-hold on first occurrence, before it turns into
+  a struggle. But the map confirms first: a spot at the edge of
   the historically swept area (a wide never-cleaned arc around it)
-  is a wall/corner - a straight edge has no inside to dive into, so
-  no gap-hunt episode; a collision point ringed by floor swept in
-  the past is definitely not a wall. The reference is the ever-swept
-  cell set (persisted separately, updated in real time as cleaning
-  proceeds), not the supervisor's conservative home-area baseline.
-  It is bound per map: each map keeps its own history, a venue
-  change is a map change, coordinates never carry across maps, and
-  a switch swaps the history (with a notification).
-- **Layered memory**: a surrendered spot is blacklisted only for the
-  current session (TTL) and cleared when the session ends — chairs
-  move, so nothing is ever hardened into a permanent no-go zone.
-  Across sessions only grid statistics persist (where it gets stuck,
-  which direction worked), never prohibitions.
+  is a wall/corner — a straight edge has no inside to handle, so
+  no intervention and native edge handling continues; a collision
+  point ringed by floor swept in the past is definitely not a
+  wall. The reference is the ever-swept cell set (persisted
+  separately, updated in real time as cleaning proceeds), not the
+  supervisor's conservative home-area baseline. It is bound per
+  map: each map keeps its own history, a venue change is a map
+  change, coordinates never carry across maps, and a switch swaps
+  the history (with a notification).
+- **Layered memory**: a spot handled successfully goes quiet
+  briefly (default 15 minutes — the robot keeps cleaning around
+  the same furniture and the soft signatures may recur benignly);
+  a spot that used up its attempts goes quiet for the session.
+  Both are "no intervention", never no-go zones — the robot cleans
+  on regardless. Chairs move, so nothing is ever hardened into a
+  permanent ban; across sessions only grid statistics persist
+  (where it gets stuck, how interventions there ended), never
+  prohibitions.
 - **Error codes**: 105 (trapped), 102/204 (drive wheel suspended),
-  etc. feed the supervisor's view and counters directly.
+  etc. feed the supervisor's view and counters; a fault persisting
+  in place is handled by the control layer as a wedge (above) —
+  counted, and acted on.
 
 ## Adapter layer: talking to the real robot
 
@@ -97,21 +113,14 @@ operations → verification checklist → rollback), in Chinese:
   patched accordingly.
 - Subscribed: position/heading, work state + dock state, battery,
   water spray level + mop attachment, error stream. Commands:
-  pause/stop/resume, return-to-dock, area cleaning (V2).
+  pause/stop/resume, return-to-dock, fresh whole-home start,
+  mapPoint directed drives, move jog steps.
 - Credentials are injected only via process/container environment
   variables, never written into code or config files; the device_id
   is fixed so repeated logins do not trigger new-device
   verification.
 
 ## Judgment layer: LLM supervision
-
-### Advisor (inside an episode)
-
-At the fixed strategy's weak points (an episode failing repeatedly,
-just before surrendering a large obstacle) the controller consults
-the LLM with a bounded plan vocabulary (staging radius/step/budget
-adjustments). The LLM never supplies coordinates; on timeout the
-fixed strategy resumes — the LLM can never stall the robot.
 
 ### Supervisor (whole session)
 
@@ -269,14 +278,16 @@ while it was down.
   trajectories), `stats.json` (cross-session stuck statistics).
 - Every command the daemon decides on is executed on the robot.
   Directed movement uses clean_V2 `mapPoint`, the one movement
-  type this firmware implements; the rectangle command
-  customArea is rejected (20011) and is not used.
+  type this firmware implements (implemented in the adapter; the
+  control layer does not use it — it discards the running
+  session); the rectangle command customArea is rejected (20011)
+  and is not used.
 
 Quick start:
 
 ```bash
-# 1) Watch it work in the simulator (no robot, no account needed)
-python3 -m bugnav.demo
+# 1) Run the tests (no robot, no account needed; includes a
+#    simulator end-to-end case)
 python3 -m unittest discover -s tests
 
 # 2) Deploy to the host
@@ -285,8 +296,9 @@ sudo bash deploy/install.sh          # or: docker compose up -d
 ```
 
 Layout: `bugnav/` (core logic + simulator + real-robot adapter),
-`deploy/` (systemd and Mac deployment pieces), `tests/` (unit and
-three-scenario end-to-end tests), `Dockerfile`, `docker-compose.yml`.
+`deploy/` (systemd and Mac deployment pieces), `tests/` (unit
+tests and a simulator end-to-end test), `Dockerfile`,
+`docker-compose.yml`.
 
 ## Known ceilings
 
