@@ -8,7 +8,8 @@
   * StateEvent / ErrorEvent for status and faults; work state via
     GetChargeState + GetWorkState (see work_state.py)
   * Commands go through clean_V2: pause / resume / stop, directed
-    movement via content type mapPoint, a fresh AUTO start in raw
+    movement via content type mapPoint, single jog steps via the
+    remote-control 'move' command, a fresh AUTO start in raw
     form, return-to-dock via Charge, the alert tone via PlaySound
 
 Hardware classes the library does not know are aliased to the
@@ -526,6 +527,15 @@ class DeebotAdapter:
             await _exec(_RawArgs({"act": "start", "content": {
                 "type": "mapPoint", "value": value}}))
             log(f"sent mapPoint value={value}")
+        elif cmd.kind == CommandKind.JOG:
+            from deebot_client.commands.json.custom import CustomCommand
+
+            # The remote-control 'move' command: one jog step
+            # (backward / forward / spinLeft / spinRight / stop).
+            # fw 1.61.0 answers code 0 and steps ~0.35 m per
+            # backward actuation (measured on the real robot).
+            await _exec(CustomCommand("move", {"act": cmd.act}))
+            log(f"sent move act={cmd.act}")
         elif cmd.kind == CommandKind.PLAY_SOUND:
             from deebot_client.commands.json import PlaySound
 

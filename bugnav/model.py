@@ -43,6 +43,10 @@ class CommandKind(str, Enum):
     # rewrite cannot touch; the robot starts cleaning at once.
     START_AUTO = "start_auto"
     MOVE_TO = "move_to"  # drive to `point` (clean_V2 mapPoint)
+    # One remote-control jog step (the 'move' command): a small
+    # reposition - back a step, forward a step, turn - that names
+    # no destination.  `act` on the Command says which step.
+    JOG = "jog"
     RETURN_TO_DOCK = "return_to_dock"  # head back to the station now
     PLAY_SOUND = "play_sound"  # the robot's OWN built-in alert sound
     NOTIFY = "notify"
@@ -54,6 +58,7 @@ class Command:
     point: Point | None = None  # target for MOVE_TO
     message: str = ""
     count: int = 1  # repetitions (PLAY_SOUND)
+    act: str = ""  # jog step for JOG (backward/forward/spinLeft/...)
 
 
 @dataclass

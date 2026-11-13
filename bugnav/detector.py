@@ -35,6 +35,13 @@ controller pauses the robot and takes over - detection never waits
 for an error, and issuing commands never suspends detection
 (latches here are positional: a handled spot re-arms by the robot
 leaving it, never by a timer or by a command having been sent).
+
+The fourth shape is the frozen wedge: the robot noses into an
+obstacle and keeps driving forward - wheels turning, body going
+nowhere at all.  Every detector above requires path length, so a
+robot that does not even jiggle is invisible to them; the pinned
+detector requires the opposite: over a full window the position
+never leaves a few centimetres while the state says cleaning.
 """
 
 from __future__ import annotations
@@ -401,3 +408,66 @@ class RammingDetector:
             approach_heading_deg=approach,
             charges=len(impact[1]), mean_leg_m=mean_leg,
         )
+
+
+@dataclass
+class PinnedConfig:
+    window_s: float = 60.0
+    radius_m: float = 0.06  # every sample this close to the window's first
+    rearm_m: float = 0.5  # leaves the centre by this -> re-armed
+
+
+@dataclass
+class PinnedEvent:
+    t: float
+    centre: object  # Point
+
+
+class PinnedDetector:
+    """Zero-displacement freeze while the state says cleaning.
+
+    The robot is nose-in against something, still driving forward,
+    and the reported position simply does not change (on the real
+    robot the frozen readings are bit-identical for minutes).  The
+    gate is deliberately the mirror image of the struggle
+    detector's: no path at all, for a full window, while cleaning.
+    Brief standstills (replanning, an obstacle scan) last seconds,
+    never a full window.  The latch is positional, like the other
+    detectors': a handled spot re-arms when the robot leaves it.
+    """
+
+    def __init__(self, config: PinnedConfig | None = None):
+        self.cfg = config or PinnedConfig()
+        self._buf: deque[Sample] = deque()
+        self._latched_centre = None  # Point while suppressed
+
+    def reset(self) -> None:
+        self._buf.clear()
+        self._latched_centre = None
+
+    def feed(self, sample: Sample) -> PinnedEvent | None:
+        if self._latched_centre is not None:
+            if sample.pos.distance_to(self._latched_centre) > (
+                self.cfg.radius_m + self.cfg.rearm_m
+            ):
+                self._latched_centre = None
+                self._buf.clear()
+            else:
+                return None
+        if sample.state != RobotState.CLEANING:
+            self._buf.clear()
+            return None
+        self._buf.append(sample)
+        while self._buf and sample.t - self._buf[0].t > self.cfg.window_s:
+            self._buf.popleft()
+        if len(self._buf) < 3:
+            return None
+        if sample.t - self._buf[0].t < self.cfg.window_s * 0.9:
+            return None  # window not full yet
+        anchor = self._buf[0].pos
+        if any(p.distance_to(anchor) > self.cfg.radius_m
+               for p in (s.pos for s in self._buf)):
+            return None
+        centre = sample.pos
+        self._latched_centre = centre
+        return PinnedEvent(t=sample.t, centre=centre)

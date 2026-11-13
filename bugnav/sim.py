@@ -161,6 +161,19 @@ class SimRobot:
             self.mode = "command"
             self._contact = None
             self._plan_to(cmd.point)
+        elif cmd.kind == CommandKind.JOG:
+            # One dumb straight step, no planner: backward backs
+            # away from the goal the firmware insists on reaching,
+            # and whatever is behind blocks it, like the real thing.
+            if cmd.act in ("backward", "forward"):
+                away = self.pos - self.goal
+                if away.length() > 1e-6:
+                    step = away.normalized().scale(
+                        0.35 if cmd.act == "backward" else -0.35
+                    )
+                    dest = self.pos + step
+                    if not self.world.blocked(dest, self.radius):
+                        self.pos = dest
 
     # ---------------------------------------------------------------- tick
     def tick(self, t: float, dt: float) -> Sample:

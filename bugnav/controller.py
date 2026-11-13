@@ -29,6 +29,16 @@ Strategy (settled with the user):
     there is a gap, that angle dives in.  The route in is the frozen
     breadcrumb trail, and if the robot cannot get out again it leaves
     by replaying that trail in reverse.
+  * Wedged rescue, ahead of any exploration: a reported fault that
+    persists while the robot stays put (a drive-wheel error reads
+    as state ERROR or as paused-with-error depending on the
+    moment), and a position frozen while cleaning, are the same
+    wedge - the robot nosed in and keeps pushing forward.  The
+    first answer is to back out, in remote-control jog steps;
+    forward is what wedged it.  Only when backing out is itself
+    blocked (something behind it too) or the fault survives the
+    back-out does the encounter escalate to the along-edge episode
+    above.
 """
 
 from __future__ import annotations
@@ -46,6 +56,8 @@ from .detector import (
     PerimeterConfig,
     PerimeterDetector,
     PerimeterEvent,
+    PinnedConfig,
+    PinnedDetector,
     RammingConfig,
     RammingDetector,
     RammingEvent,
@@ -59,6 +71,7 @@ from .trail import BreadcrumbTrail
 
 class Phase(str, Enum):
     MONITOR = "monitor"
+    UNSTICK = "unstick"  # backing a wedged robot out, jog step by jog step
     RETREAT = "retreat"  # going back to the entry anchor
     TO_STAGING = "to_staging"  # moving to the next perimeter staging point
     TO_GOAL = "to_goal"  # trying to reach the goal from this staging point
@@ -137,6 +150,15 @@ class ControllerConfig:
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     perimeter: PerimeterConfig = field(default_factory=PerimeterConfig)
     ramming: RammingConfig = field(default_factory=RammingConfig)
+    pinned: PinnedConfig = field(default_factory=PinnedConfig)
+    # Wedged rescue (a fault persisting in place, or a frozen
+    # position): back out FIRST, in jog steps - the direct cure
+    # for a nose-in wedge - before any session-killing move.
+    error_rescue_delay_s: float = 10.0  # a fault must persist this long
+    jog_observe_s: float = 8.0  # watch one jog step this long
+    jog_free_m: float = 0.25  # displacement that counts as backed out
+    jog_max_steps: int = 3  # backward steps before the rear reads blocked
+    unstick_resume_grace_s: float = 12.0  # wait for a self-resume after freeing
     # No waiting for the firmware to circle first - an obstacle
     # encounter goes straight into the
     # along-edge logic, in every scenario; where there is a gap, dive
@@ -172,6 +194,7 @@ class BugNavController:
         self.detector = StruggleDetector(self.cfg.detector)
         self.perimeter = PerimeterDetector(self.cfg.perimeter)
         self.ramming = RammingDetector(self.cfg.ramming)
+        self.pinned = PinnedDetector(self.cfg.pinned)
         # Centres already taken over via the perimeter trigger this
         # session (a chair moves; nothing here outlives the session).
         self._perimeter_handled: list[Point] = []
@@ -214,6 +237,17 @@ class BugNavController:
         self._cooldown_until = 0.0
         self._consult_pos: Point | None = None
         self._error_pause_sent = False
+        # Wedged-rescue state: the spot being backed out of, how
+        # many jog steps are out, when the current step's watch
+        # ends, and when the robot first got clear (grace clock).
+        self._unstick_pos: Point | None = None
+        self._unstick_steps = 0
+        self._unstick_deadline = 0.0
+        self._unstick_freed_at: float | None = None
+        # Fault-persistence tracker (MONITOR): a fault counts as a
+        # wedge only while it persists AND the robot stays put.
+        self._err_since: float | None = None
+        self._err_pos: Point | None = None
         # Strategy-advisor state (per episode)
         self.pending_consult: ConsultRequest | None = None
         self._consults_used = 0
@@ -291,6 +325,8 @@ class BugNavController:
             if sample.t >= self._cooldown_until:
                 self.phase = Phase.MONITOR
             cmds = self._tick_monitor(sample)
+        elif self.phase == Phase.UNSTICK:
+            cmds = self._tick_unstick(sample)
         else:
             cmds = self._tick_episode(sample)
         return cmds
@@ -327,16 +363,41 @@ class BugNavController:
         self.trail.record(sample)
         self._track_free_heading(sample)
         event = self.detector.feed(sample)
-        if sample.error_code != 0 and sample.state == RobotState.ERROR:
-            # A real error (e.g. wheel suspended). Too late to prevent,
-            # but still an episode: record the hit at the current spot.
-            from .detector import StruggleEvent
-
-            event = event or StruggleEvent(
-                t=sample.t,
-                centre=sample.pos,
-                approach_heading_deg=sample.heading_deg or 0.0,
-            )
+        pin_event = self.pinned.feed(sample)
+        # A reported fault that PERSISTS while the robot stays put
+        # is a wedge, whatever state label carries it: the firmware
+        # reports one and the same drive-wheel fault as ERROR or as
+        # paused-with-error depending on the moment, and both forms
+        # sit frozen.  A fault that clears, or one the robot drives
+        # away from, is not a wedge and needs no rescue.
+        if sample.error_code != 0 and sample.state in (
+            RobotState.ERROR,
+            RobotState.PAUSED,
+        ):
+            if (
+                self._err_pos is None
+                or sample.pos.distance_to(self._err_pos) > 0.3
+            ):
+                self._err_since = sample.t
+                self._err_pos = sample.pos
+            if (
+                self._err_since is not None
+                and sample.t - self._err_since
+                >= self.cfg.error_rescue_delay_s
+            ):
+                code = sample.error_code
+                self._err_since = None
+                self._err_pos = None
+                return self._begin_unstick(
+                    sample,
+                    reason=(
+                        f"error {code} persisting with the robot "
+                        "stationary"
+                    ),
+                )
+        else:
+            self._err_since = None
+            self._err_pos = None
         if (event is not None and sample.error_code == 0
                 and self._within_resolved(event.centre, sample.t)):
             # This spot's episode just succeeded - the robot is
@@ -351,6 +412,14 @@ class BugNavController:
             pe = self.perimeter.feed(sample)
             if pe is not None:
                 return self._on_perimeter_event(sample, pe)
+            if pin_event is not None:
+                return self._begin_unstick(
+                    sample,
+                    reason=(
+                        "position frozen while cleaning for "
+                        f"{self.cfg.pinned.window_s:.0f} s"
+                    ),
+                )
             return []
         # Approach heading = the direction it was travelling the last
         # time it was moving freely. (The trail and the struggle window
@@ -553,6 +622,184 @@ class BugNavController:
             cmds.append(Command(CommandKind.MOVE_TO, point=self._anchor))
         else:
             cmds.extend(self._next_attempt(sample))
+        return cmds
+
+    # ------------------------------------------------------------ unstick
+    def _begin_unstick(
+        self, sample: Sample, *, reason: str
+    ) -> list[Command]:
+        """Back a wedged robot out FIRST, one jog step at a time.
+
+        No pause-then-mapPoint, no exploration yet: the wedge is
+        nose-in, and the way out is the way it came - backwards.
+        Exploration only starts if the back-out itself fails.
+        """
+        centre = sample.pos
+        cluster = self.clusters.find_or_create(centre)
+        self._cluster = cluster
+        key = cluster.grid_key()
+        self._stats_key = key
+        st = self.stats.setdefault(key, EpisodeStats(grid_key=key))
+        st.episodes += 1
+        self._save_stats()
+        self._unstick_pos = centre
+        self._unstick_steps = 1
+        self._unstick_deadline = sample.t + self.cfg.jog_observe_s
+        self._unstick_freed_at = None
+        cmds: list[Command] = []
+        if sample.state == RobotState.CLEANING:
+            # Take over before jogging, as the remote-control flow
+            # itself does; a fault-paused robot is already held.
+            cmds.append(Command(CommandKind.PAUSE))
+        cmds.append(
+            Command(
+                CommandKind.NOTIFY,
+                message=(
+                    f"robot wedged at {centre} ({reason}); backing "
+                    "out first - forward is what wedged it"
+                ),
+            )
+        )
+        cmds.append(Command(CommandKind.JOG, act="backward"))
+        self.phase = Phase.UNSTICK
+        return cmds
+
+    def _tick_unstick(self, sample: Sample) -> list[Command]:
+        assert self._unstick_pos is not None
+        if sample.state in (RobotState.DOCKED, RobotState.RETURNING):
+            # It got home (or is on its way) without us: the wedge
+            # is moot, close the rescue and go back to watching.
+            self._unstick_pos = None
+            cmds = [
+                Command(
+                    CommandKind.NOTIFY,
+                    message="wedged robot is heading back to the "
+                    "dock on its own; unstick closed",
+                )
+            ]
+            self._end_episode(sample)
+            return cmds
+        disp = sample.pos.distance_to(self._unstick_pos)
+        if self._unstick_freed_at is None:
+            if disp >= self.cfg.jog_free_m:
+                self._unstick_freed_at = sample.t
+                cmds = [
+                    Command(CommandKind.JOG, act="stop"),
+                    Command(
+                        CommandKind.NOTIFY,
+                        message=(
+                            f"backed out {disp:.2f} m from the "
+                            "wedge; watching whether it resumes"
+                        ),
+                    ),
+                ]
+                if sample.state == RobotState.PAUSED:
+                    # Resume the held session if it survived the
+                    # wedge; if it did not, the grace below falls
+                    # back to a fresh AUTO start from right here.
+                    cmds.append(Command(CommandKind.RESUME_AUTO))
+                return cmds
+            if sample.t >= self._unstick_deadline:
+                if (
+                    sample.state != RobotState.CLEANING
+                    and self._unstick_steps < self.cfg.jog_max_steps
+                ):
+                    self._unstick_steps += 1
+                    self._unstick_deadline = (
+                        sample.t + self.cfg.jog_observe_s
+                    )
+                    return [Command(CommandKind.JOG, act="backward")]
+                # The rear is blocked too - or it is driving again
+                # yet still pinned at this spot.  Either way the
+                # straight back-out has failed: along-edge
+                # exploration takes over from here.
+                return self._unstick_escalate(sample)
+            return []
+        # Backed out.  Give the session a grace window to resume
+        # on its own (fault cleared, or our resume landed).
+        if sample.state == RobotState.CLEANING:
+            return self._unstick_resolved(
+                sample, "it is cleaning again on its own"
+            )
+        if (
+            sample.t - self._unstick_freed_at
+            >= self.cfg.unstick_resume_grace_s
+        ):
+            if sample.error_code != 0:
+                # The fault survived the back-out: this is more
+                # than a wedge - the episode machinery (and its
+                # own fault handling) takes it from here.
+                return self._unstick_escalate(sample)
+            cmds = [
+                Command(
+                    CommandKind.NOTIFY,
+                    message=(
+                        "backed out and the fault cleared, but "
+                        "the cleaning session did not survive the "
+                        "wedge; starting a fresh auto clean here"
+                    ),
+                ),
+                Command(CommandKind.START_AUTO),
+            ]
+            self._unstick_mark_resolved(sample)
+            self._unstick_pos = None
+            self._end_episode(sample)
+            return cmds
+        return []
+
+    def _unstick_mark_resolved(self, sample: Sample) -> None:
+        cl = self._cluster
+        if cl is None:
+            return
+        self._resolved_marks.append(
+            (cl.centre, cl.radius_m,
+             sample.t + self.cfg.resolved_suppress_s)
+        )
+        st = self.stats.get(self._stats_key)
+        if st is not None:
+            st.successes += 1
+            self._save_stats()
+
+    def _unstick_resolved(
+        self, sample: Sample, how: str
+    ) -> list[Command]:
+        cmds = [
+            Command(
+                CommandKind.NOTIFY,
+                message=f"unstick complete at {self._unstick_pos}: {how}",
+            )
+        ]
+        self._unstick_mark_resolved(sample)
+        self._unstick_pos = None
+        self._end_episode(sample)
+        return cmds
+
+    def _unstick_escalate(self, sample: Sample) -> list[Command]:
+        """The back-out failed: hand the spot to the along-edge
+        episode, whose staging-ring exploration works it from
+        successive angles."""
+        centre = self._unstick_pos
+        assert centre is not None
+        self._unstick_pos = None
+        self._unstick_freed_at = None
+        approach = self._free_heading
+        if approach is None:
+            approach = sample.heading_deg or 0.0
+        cmds = [
+            Command(
+                CommandKind.NOTIFY,
+                message=(
+                    "backing out did not free it (rear blocked, "
+                    "or the fault persists); switching to "
+                    "along-edge exploration"
+                ),
+            )
+        ]
+        cmds.extend(
+            self._begin_episode(
+                sample, centre, approach, cluster=self._cluster
+            )
+        )
         return cmds
 
     # ------------------------------------------------------------ episode

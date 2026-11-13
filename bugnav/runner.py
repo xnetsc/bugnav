@@ -83,7 +83,7 @@ async def _main_async(cfg_path: str) -> None:
     adapter = DeebotAdapter(AdapterConfig(**account))
     ctl_cfg = ControllerConfig()
     for k, v in raw.get("controller", {}).items():
-        if k in ("detector", "perimeter"):
+        if k in ("detector", "perimeter", "pinned"):
             for dk, dv in v.items():
                 setattr(getattr(ctl_cfg, k), dk, dv)
         else:
